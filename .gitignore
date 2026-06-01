@@ -1,0 +1,14 @@
+.DS_Store
+.idea
+.vscode
+.cursor
+**/*.swp
+**/venv
+**/.venv
+**/bin
+**/node_modules
+*__pycache__
+**/vendor
+Pipfile*
+.vscode
+/thoughts
