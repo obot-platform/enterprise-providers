@@ -100,7 +100,6 @@ func main() {
 	oauthProxyOpts.Cookie.Name = "obot_access_token"
 	oauthProxyOpts.Cookie.Secret = string(cookieSecret)
 	oauthProxyOpts.Cookie.Secure = strings.HasPrefix(opts.ObotServerURL, "https://")
-	oauthProxyOpts.Templates.Path = os.Getenv("GPTSCRIPT_TOOL_DIR") + "/../auth-providers-common/templates"
 	oauthProxyOpts.RawRedirectURL = opts.ObotServerURL + "/"
 	if opts.AuthEmailDomains != "" {
 		emailDomains := strings.Split(opts.AuthEmailDomains, ",")
