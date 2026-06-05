@@ -14,17 +14,28 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/obot-platform/enterprise-tools/azure-model-provider/azurecommon"
-	bifrostprovider "github.com/obot-platform/enterprise-tools/bifrost-model-provider"
+	"github.com/obot-platform/enterprise-providers/azure-model-provider/azurecommon"
+	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 func main() {
-	if err := mainErr(context.Background()); err != nil {
-		log.Fatal(err)
+	isValidate := len(os.Args) > 1 && os.Args[1] == "validate"
+	if err := mainErr(context.Background(), isValidate); err != nil {
+		if isValidate {
+			message := validationErrorMessage(err)
+			log.Printf("ERROR Invalid Azure Credentials: %v", err)
+			errorJSON := map[string]string{"error": message}
+			if encErr := json.NewEncoder(os.Stdout).Encode(errorJSON); encErr != nil {
+				log.Fatal(encErr)
+			}
+			os.Exit(1)
+		} else {
+			log.Fatal(err)
+		}
 	}
 }
 
-func mainErr(ctx context.Context) error {
+func mainErr(ctx context.Context, isValidate bool) error {
 	endpoint := os.Getenv("OBOT_AZURE_MODEL_PROVIDER_ENDPOINT")
 	if endpoint == "" {
 		return errors.New("OBOT_AZURE_MODEL_PROVIDER_ENDPOINT not found")
@@ -58,6 +69,14 @@ func mainErr(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to build models response: %w", err)
+	}
+
+	if err := validateCredentials(ctx, endpoint, apiKey, apiVersion); err != nil {
+		return fmt.Errorf("failed to validate Azure credentials: %w", err)
+	}
+
+	if isValidate {
+		return nil
 	}
 
 	apiVersionEnvVar := schemas.EnvVar{Val: apiVersion}
@@ -96,8 +115,6 @@ func mainErr(ctx context.Context) error {
 
 	mux.HandleFunc("POST /v1/responses", handler.HandleResponses)
 
-	mux.HandleFunc("GET /validate", validate(endpoint, apiKey, apiVersion))
-
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("404 %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
@@ -111,23 +128,6 @@ func mainErr(ctx context.Context) error {
 	addr := listenHost + ":" + port
 	log.Printf("Starting server on %s", addr)
 	return http.ListenAndServe(addr, mux)
-}
-
-func validate(endpoint, apiKey, apiVersion string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if err := validateCredentials(r.Context(), endpoint, apiKey, apiVersion); err != nil {
-			err = fmt.Errorf("failed to validate Azure credentials: %w", err)
-			log.Printf("ERROR Invalid Azure Credentials: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			if encErr := json.NewEncoder(w).Encode(map[string]string{"error": validationErrorMessage(err)}); encErr != nil {
-				log.Printf("Failed to encode validation error response: %v", encErr)
-			}
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-	}
 }
 
 // validateCredentials checks that the API key is accepted by the Azure OpenAI endpoint.

@@ -1,4 +1,4 @@
-module github.com/obot-platform/enterprise-tools/entra-auth-provider
+module github.com/obot-platform/enterprise-providers/entra-auth-provider
 
 go 1.26.2
 
@@ -10,7 +10,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/microsoftgraph/msgraph-sdk-go v1.79.0
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
-	github.com/obot-platform/providers/auth-providers-common v0.0.0-20260601145713-1c581beb9ce4
+	github.com/obot-platform/providers/auth-providers-common v0.0.0-20260605221712-d90e9d6df0eb
 	github.com/sahilm/fuzzy v0.1.1
 )
 

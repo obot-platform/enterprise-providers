@@ -1,4 +1,4 @@
-module github.com/obot-platform/enterprise-tools/amazon-bedrock-api-key-model-provider
+module github.com/obot-platform/enterprise-providers/amazon-bedrock-api-key-model-provider
 
 go 1.26.2
 
@@ -7,8 +7,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/bedrock v1.59.1
 	github.com/aws/smithy-go v1.25.0
 	github.com/maximhq/bifrost/core v1.5.2
-	github.com/obot-platform/enterprise-tools/amazon-bedrock-model-provider v0.0.0-00010101000000-000000000000
-	github.com/obot-platform/enterprise-tools/bifrost-model-provider v0.0.0
+	github.com/obot-platform/enterprise-providers/amazon-bedrock-model-provider v0.0.0-00010101000000-000000000000
+	github.com/obot-platform/enterprise-providers/bifrost-model-provider v0.0.0
 )
 
 require (
@@ -75,6 +75,6 @@ require (
 )
 
 replace (
-	github.com/obot-platform/enterprise-tools/amazon-bedrock-model-provider => ../amazon-bedrock-model-provider
-	github.com/obot-platform/enterprise-tools/bifrost-model-provider => ../bifrost-model-provider
+	github.com/obot-platform/enterprise-providers/amazon-bedrock-model-provider => ../amazon-bedrock-model-provider
+	github.com/obot-platform/enterprise-providers/bifrost-model-provider => ../bifrost-model-provider
 )

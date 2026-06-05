@@ -1,4 +1,4 @@
-module github.com/obot-platform/enterprise-tools/okta-auth-provider
+module github.com/obot-platform/enterprise-providers/okta-auth-provider
 
 go 1.26.2
 
@@ -6,7 +6,7 @@ replace github.com/oauth2-proxy/oauth2-proxy/v7 => github.com/obot-platform/oaut
 
 require (
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
-	github.com/obot-platform/providers/auth-providers-common v0.0.0-20260601145713-1c581beb9ce4
+	github.com/obot-platform/providers/auth-providers-common v0.0.0-20260605221712-d90e9d6df0eb
 	github.com/okta/okta-sdk-golang/v5 v5.0.6
 	github.com/sahilm/fuzzy v0.1.1
 )
@@ -41,7 +41,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.9.1 // indirect
+	github.com/jackc/pgx/v5 v5.9.2 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect

@@ -1,9 +1,9 @@
-module github.com/obot-platform/enterprise-tools/gemini-vertex-model-provider
+module github.com/obot-platform/enterprise-providers/gemini-vertex-model-provider
 
 go 1.26.3
 
 require (
-	github.com/obot-platform/providers/openai-model-provider v0.0.0-20260601145713-1c581beb9ce4
+	github.com/obot-platform/providers/openai-model-provider v0.0.0-20260605221712-d90e9d6df0eb
 	golang.org/x/oauth2 v0.32.0
 )
 

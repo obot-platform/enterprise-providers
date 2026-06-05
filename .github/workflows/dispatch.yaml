@@ -1,4 +1,4 @@
-name: Tag Release of enterprise tools
+name: Tag Release of enterprise providers
 on:
   repository_dispatch:
     types: release

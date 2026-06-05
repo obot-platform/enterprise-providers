@@ -1,10 +1,10 @@
-module github.com/obot-platform/enterprise-tools/azure-model-provider
+module github.com/obot-platform/enterprise-providers/azure-model-provider
 
 go 1.26.2
 
 require (
 	github.com/maximhq/bifrost/core v1.5.2
-	github.com/obot-platform/enterprise-tools/bifrost-model-provider v0.0.0
+	github.com/obot-platform/enterprise-providers/bifrost-model-provider v0.0.0
 )
 
 require (
@@ -72,4 +72,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/obot-platform/enterprise-tools/bifrost-model-provider => ../bifrost-model-provider
+replace github.com/obot-platform/enterprise-providers/bifrost-model-provider => ../bifrost-model-provider

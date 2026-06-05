@@ -1,11 +1,11 @@
-module github.com/obot-platform/enterprise-tools/azure-entra-model-provider
+module github.com/obot-platform/enterprise-providers/azure-entra-model-provider
 
 go 1.26.2
 
 require (
 	github.com/maximhq/bifrost/core v1.5.2
-	github.com/obot-platform/enterprise-tools/azure-model-provider v0.0.0
-	github.com/obot-platform/enterprise-tools/bifrost-model-provider v0.0.0
+	github.com/obot-platform/enterprise-providers/azure-model-provider v0.0.0
+	github.com/obot-platform/enterprise-providers/bifrost-model-provider v0.0.0
 )
 
 require (
@@ -74,6 +74,6 @@ require (
 )
 
 replace (
-	github.com/obot-platform/enterprise-tools/azure-model-provider => ../azure-model-provider
-	github.com/obot-platform/enterprise-tools/bifrost-model-provider => ../bifrost-model-provider
+	github.com/obot-platform/enterprise-providers/azure-model-provider => ../azure-model-provider
+	github.com/obot-platform/enterprise-providers/bifrost-model-provider => ../bifrost-model-provider
 )

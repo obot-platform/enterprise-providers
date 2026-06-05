@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	bifrostprovider "github.com/obot-platform/enterprise-tools/bifrost-model-provider"
+	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 // azureEndpointSuffixes is an allowlist of recognized Azure OpenAI endpoint host suffixes.

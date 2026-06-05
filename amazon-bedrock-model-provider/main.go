@@ -9,22 +9,32 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/obot-platform/enterprise-tools/amazon-bedrock-model-provider/bedrockcommon"
-	bifrostprovider "github.com/obot-platform/enterprise-tools/bifrost-model-provider"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrock"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/obot-platform/enterprise-providers/amazon-bedrock-model-provider/bedrockcommon"
+	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 func main() {
-	if err := mainErr(context.Background()); err != nil {
-		log.Fatal(err)
+	isValidate := len(os.Args) > 1 && os.Args[1] == "validate"
+	if err := mainErr(context.Background(), isValidate); err != nil {
+		if isValidate {
+			message := validationErrorMessage(err)
+			log.Printf("ERROR Invalid Amazon Bedrock Credentials: %v", err)
+			errorJSON := map[string]string{"error": message}
+			if encErr := json.NewEncoder(os.Stdout).Encode(errorJSON); encErr != nil {
+				log.Fatal(encErr)
+			}
+			os.Exit(1)
+		} else {
+			log.Fatal(err)
+		}
 	}
 }
 
-func mainErr(ctx context.Context) error {
+func mainErr(ctx context.Context, isValidate bool) error {
 	accessKeyID := os.Getenv("OBOT_AMAZON_BEDROCK_MODEL_PROVIDER_ACCESS_KEY_ID")
 	if accessKeyID == "" {
 		return errors.New("OBOT_AMAZON_BEDROCK_MODEL_PROVIDER_ACCESS_KEY_ID not found")
@@ -57,6 +67,11 @@ func mainErr(ctx context.Context) error {
 	}
 	bedrockClient := bedrock.NewFromConfig(awsCfg)
 
+	// Validate credentials by making a lightweight API call.
+	if _, err := bedrockClient.ListFoundationModels(ctx, &bedrock.ListFoundationModelsInput{}); err != nil {
+		return fmt.Errorf("failed to validate AWS credentials: %w", err)
+	}
+
 	handler, err := bifrostprovider.NewHandler(ctx, bifrostprovider.NewAccount(schemas.Bedrock, []schemas.Key{{
 		Models:           schemas.WhiteList{"*"},
 		Weight:           1.0,
@@ -66,6 +81,10 @@ func mainErr(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize bifrost: %w", err)
 	}
 	defer handler.Shutdown()
+
+	if isValidate {
+		return nil
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -96,8 +115,6 @@ func mainErr(ctx context.Context) error {
 
 	mux.HandleFunc("POST /v1/responses", handler.HandleResponses)
 
-	mux.HandleFunc("GET /validate", validate(bedrockClient))
-
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("404 %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
@@ -111,21 +128,4 @@ func mainErr(ctx context.Context) error {
 	addr := listenHost + ":" + port
 	log.Printf("Starting server on %s", addr)
 	return http.ListenAndServe(addr, mux)
-}
-
-func validate(bedrockClient *bedrock.Client) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := bedrockClient.ListFoundationModels(r.Context(), &bedrock.ListFoundationModelsInput{}); err != nil {
-			err = fmt.Errorf("failed to validate AWS credentials: %w", err)
-			log.Printf("ERROR Invalid Amazon Bedrock Credentials: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			if encErr := json.NewEncoder(w).Encode(map[string]string{"error": validationErrorMessage(err)}); encErr != nil {
-				log.Printf("Failed to encode validation error response: %v", encErr)
-			}
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-	}
 }
