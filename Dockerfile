@@ -1,36 +1,21 @@
 # syntax=docker/dockerfile:1
+FROM cgr.dev/chainguard/wolfi-base AS base
 
-FROM cgr.dev/chainguard/wolfi-base AS build
+RUN apk upgrade --no-cache && apk add --no-cache go make git curl
 
-RUN apk upgrade --no-cache && apk add --no-cache go-1.26 ca-certificates
-
-ARG PROVIDER_DIR
-WORKDIR /src
-COPY . .
-
-RUN test -n "${PROVIDER_DIR}" \
-    && test -f "${PROVIDER_DIR}/go.mod"
-
+FROM base AS build
+WORKDIR /obot-providers/enterprise-providers
+COPY . /obot-providers/enterprise-providers
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/root/go/pkg/mod \
-    cd "${PROVIDER_DIR}" \
-    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/bin/provider .
+    BIN_DIR=/bin make package-providers
 
-RUN mkdir -p "/out/provider/bin" \
-    && cp /out/bin/provider "/out/provider/bin/provider" \
-    && if [ -d auth-providers-common/templates ]; then \
-        mkdir -p /out/provider/auth-providers-common/templates; \
-        cp -R auth-providers-common/templates/. /out/provider/auth-providers-common/templates/; \
-    fi
+RUN mkdir -p /runtime/obot-providers/enterprise-providers \
+    && cp /obot-providers/.envrc.providers.enterprise /runtime/obot-providers/.envrc.providers.enterprise \
+    && cp -a auth-providers model-providers /runtime/obot-providers/enterprise-providers/ \
+    && find /obot-providers/enterprise-providers -mindepth 2 -maxdepth 2 -type d -name bin -exec sh -c 'provider="$(basename "$(dirname "$1")")"; mkdir -p "/runtime/obot-providers/enterprise-providers/${provider}"; cp -a "$1" "/runtime/obot-providers/enterprise-providers/${provider}/bin"' _ {} \;
 
-FROM cgr.dev/chainguard/wolfi-base
-
+FROM cgr.dev/chainguard/wolfi-base AS enterprise-providers
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
-
-ARG PROVIDER_DIR
-ENV PORT=8000
-
-COPY --from=build /out/provider /provider
-
-EXPOSE 8000 9999
-ENTRYPOINT ["/provider/bin/provider"]
+WORKDIR /obot-providers/enterprise-providers
+COPY --from=build /runtime/ /

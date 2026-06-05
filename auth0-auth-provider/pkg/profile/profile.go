@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/obot-platform/enterprise-tools/auth0-auth-provider/pkg/client"
+	"github.com/obot-platform/enterprise-providers/auth0-auth-provider/pkg/client"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
 

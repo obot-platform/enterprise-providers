@@ -11,17 +11,28 @@ import (
 	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/obot-platform/enterprise-tools/azure-model-provider/azurecommon"
-	bifrostprovider "github.com/obot-platform/enterprise-tools/bifrost-model-provider"
+	"github.com/obot-platform/enterprise-providers/azure-model-provider/azurecommon"
+	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 func main() {
-	if err := mainErr(context.Background()); err != nil {
-		log.Fatal(err)
+	isValidate := len(os.Args) > 1 && os.Args[1] == "validate"
+	if err := mainErr(context.Background(), isValidate); err != nil {
+		if isValidate {
+			message := validationErrorMessage(err)
+			log.Printf("ERROR Invalid Azure Entra ID Credentials: %v", err)
+			errorJSON := map[string]string{"error": message}
+			if encErr := json.NewEncoder(os.Stdout).Encode(errorJSON); encErr != nil {
+				log.Fatal(encErr)
+			}
+			os.Exit(1)
+		} else {
+			log.Fatal(err)
+		}
 	}
 }
 
-func mainErr(ctx context.Context) error {
+func mainErr(ctx context.Context, isValidate bool) error {
 	endpoint := os.Getenv("OBOT_AZURE_ENTRA_MODEL_PROVIDER_ENDPOINT")
 	if endpoint == "" {
 		return errors.New("OBOT_AZURE_ENTRA_MODEL_PROVIDER_ENDPOINT not found")
@@ -66,6 +77,10 @@ func mainErr(ctx context.Context) error {
 		return errors.New("OBOT_AZURE_ENTRA_MODEL_PROVIDER_RESOURCE_NAME not found")
 	}
 
+	if _, err := fetchDeploymentsFromManagement(ctx, subscriptionID, resourceGroup, resourceName, tenantID, clientID, clientSecret); err != nil {
+		return fmt.Errorf("failed to fetch deployments from Azure: %w", err)
+	}
+
 	apiVersionEnvVar := schemas.EnvVar{Val: apiVersion}
 	handler, err := bifrostprovider.NewHandler(ctx, bifrostprovider.NewAccount(schemas.Azure, []schemas.Key{{
 		Models: schemas.WhiteList{"*"},
@@ -82,6 +97,10 @@ func mainErr(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize bifrost: %w", err)
 	}
 	defer handler.Shutdown()
+
+	if isValidate {
+		return nil
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -113,8 +132,6 @@ func mainErr(ctx context.Context) error {
 
 	mux.HandleFunc("POST /v1/responses", handler.HandleResponses)
 
-	mux.HandleFunc("GET /validate", validate(subscriptionID, resourceGroup, resourceName, tenantID, clientID, clientSecret))
-
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("404 %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
@@ -128,21 +145,4 @@ func mainErr(ctx context.Context) error {
 	addr := listenHost + ":" + port
 	log.Printf("Starting server on %s", addr)
 	return http.ListenAndServe(addr, mux)
-}
-
-func validate(subscriptionID, resourceGroup, resourceName, tenantID, clientID, clientSecret string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := fetchDeploymentsFromManagement(r.Context(), subscriptionID, resourceGroup, resourceName, tenantID, clientID, clientSecret); err != nil {
-			err = fmt.Errorf("failed to fetch deployments from Azure: %w", err)
-			log.Printf("ERROR Invalid Azure Entra ID Credentials: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			if encErr := json.NewEncoder(w).Encode(map[string]string{"error": validationErrorMessage(err)}); encErr != nil {
-				log.Printf("Failed to encode validation error response: %v", encErr)
-			}
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-	}
 }

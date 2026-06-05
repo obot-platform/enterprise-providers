@@ -7,7 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/bedrock"
 	"github.com/aws/aws-sdk-go-v2/service/bedrock/types"
-	bifrostprovider "github.com/obot-platform/enterprise-tools/bifrost-model-provider"
+	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 // ListInferenceProfiles returns all active system-defined Bedrock inference profiles.

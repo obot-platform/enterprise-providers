@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/obot-platform/enterprise-tools/azure-model-provider/azurecommon"
+	"github.com/obot-platform/enterprise-providers/azure-model-provider/azurecommon"
 )
 
 func TestParseDeployments(t *testing.T) {

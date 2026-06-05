@@ -1,4 +1,4 @@
-module github.com/obot-platform/enterprise-tools/bifrost-model-provider
+module github.com/obot-platform/enterprise-providers/bifrost-model-provider
 
 go 1.26.2
 
