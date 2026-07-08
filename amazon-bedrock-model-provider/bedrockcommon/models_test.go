@@ -85,6 +85,26 @@ func TestListMantleModelsReturnsHTTPErrorForNon2xx(t *testing.T) {
 	}
 }
 
+func TestListMantleModelsReturnsReadErrorForNon2xxBody(t *testing.T) {
+	client := &http.Client{Transport: responseRoundTripper{
+		statusCode: http.StatusInternalServerError,
+		status:     http.StatusText(http.StatusInternalServerError),
+		readErr:    errors.New("read failed"),
+	}}
+
+	_, err := ListMantleModels(t.Context(), client, "us-east-1")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var httpErr HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("error = %T, want HTTPError", err)
+	}
+	if got, want := httpErr.Body, "failed to read error response body: read failed"; got != want {
+		t.Fatalf("Body = %q, want %q", got, want)
+	}
+}
+
 func TestWithDefaultTimeout(t *testing.T) {
 	t.Run("nil client", func(t *testing.T) {
 		client := withDefaultTimeout(nil)
@@ -187,14 +207,31 @@ type responseRoundTripper struct {
 	statusCode int
 	status     string
 	body       string
+	readErr    error
 }
 
 func (r responseRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	body := io.ReadCloser(io.NopCloser(strings.NewReader(r.body)))
+	if r.readErr != nil {
+		body = errorReadCloser{err: r.readErr}
+	}
 	return &http.Response{
 		StatusCode: r.statusCode,
 		Status:     r.status,
-		Body:       io.NopCloser(strings.NewReader(r.body)),
+		Body:       body,
 	}, nil
+}
+
+type errorReadCloser struct {
+	err error
+}
+
+func (e errorReadCloser) Read([]byte) (int, error) {
+	return 0, e.err
+}
+
+func (e errorReadCloser) Close() error {
+	return nil
 }
 
 type rewriteHostTransport struct {

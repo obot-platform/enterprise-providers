@@ -77,7 +77,10 @@ func ListMantleModels(ctx context.Context, client *http.Client, region string) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if err != nil {
+			return nil, HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, Body: fmt.Sprintf("failed to read error response body: %v", err)}
+		}
 		return nil, HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(body))}
 	}
 
