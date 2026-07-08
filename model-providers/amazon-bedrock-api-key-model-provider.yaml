@@ -17,4 +17,3 @@ optionalConfigurationParameters:
     friendlyName: "AWS Region"
     description: "AWS Region for Amazon Bedrock (defaults to us-east-1)"
     sensitive: false
-dialect: "BifrostRequest"

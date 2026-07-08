@@ -1,116 +1,189 @@
 package bedrockcommon
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/bedrock"
-	"github.com/aws/aws-sdk-go-v2/service/bedrock/types"
-	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4signer "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 )
 
-// ListInferenceProfiles returns all active system-defined Bedrock inference profiles.
-// We call the AWS SDK directly rather than using bifrost's ListModels because bifrost
-// returns foundation model IDs (e.g. "anthropic.claude-3-5-sonnet-20241022-v2:0") that
-// require a "us." cross-region inference prefix to be routable. The AWS
-// ListInferenceProfiles API returns the correct prefixed IDs directly, and also lets us
-// determine usage type from the underlying foundation model's output modalities.
-func ListInferenceProfiles(ctx context.Context, client *bedrock.Client) ([]bifrostprovider.Model, error) {
-	usageByModelID, err := buildModelUsageMap(ctx, client)
+const (
+	defaultRegion  = "us-east-1"
+	signingService = "bedrock"
+	defaultTimeout = 30 * time.Second
+
+	dialectAnthropicMessages = "AnthropicMessages"
+	dialectOpenAIResponses   = "OpenAIResponses"
+	usageLLM                 = "llm"
+)
+
+type Model struct {
+	ID       string            `json:"id"`
+	Object   string            `json:"object,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+type modelsResponse struct {
+	Object string  `json:"object"`
+	Data   []Model `json:"data"`
+}
+
+type StaticAuth struct {
+	Region          string
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
+}
+
+type HTTPError struct {
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e HTTPError) Error() string {
+	if e.Body == "" {
+		return e.Status
+	}
+	return fmt.Sprintf("%s: %s", e.Status, e.Body)
+}
+
+func mantleModelsURL(region string) string {
+	if region == "" {
+		region = defaultRegion
+	}
+	return fmt.Sprintf("https://bedrock-mantle.%s.api.aws/v1/models", region)
+}
+
+func ListMantleModels(ctx context.Context, client *http.Client, region string) ([]Model, error) {
+	client = withDefaultTimeout(client)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mantleModelsURL(region), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	var models []bifrostprovider.Model
-	var nextToken *string
-	for {
-		resp, err := client.ListInferenceProfiles(ctx, &bedrock.ListInferenceProfilesInput{
-			TypeEquals: types.InferenceProfileTypeSystemDefined,
-			NextToken:  nextToken,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to list inference profiles: %w", err)
-		}
-		for _, p := range resp.InferenceProfileSummaries {
-			if p.Status != types.InferenceProfileStatusActive || p.InferenceProfileId == nil {
-				continue
-			}
-			usage := inferenceProfileUsage(p, usageByModelID)
-			if usage == "" {
-				continue
-			}
-			models = append(models, bifrostprovider.Model{
-				ID:     *p.InferenceProfileId,
-				Object: "model",
-				Metadata: map[string]string{
-					"usage": usage,
-				},
-			})
-		}
-		if resp.NextToken == nil {
-			break
-		}
-		nextToken = resp.NextToken
-	}
-	return models, nil
-}
-
-// buildModelUsageMap calls ListFoundationModels and returns a map of model ID → usage type.
-// Legacy models are excluded so their inference profiles get filtered out — they return
-// "endpoint not found" or "access denied (legacy)" errors on invocation even though
-// ListInferenceProfiles still reports their profiles as ACTIVE.
-func buildModelUsageMap(ctx context.Context, client *bedrock.Client) (map[string]string, error) {
-	resp, err := client.ListFoundationModels(ctx, &bedrock.ListFoundationModelsInput{})
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list foundation models: %w", err)
+		return nil, err
 	}
-	usageMap := make(map[string]string, len(resp.ModelSummaries))
-	for _, m := range resp.ModelSummaries {
-		if m.ModelId == nil {
-			continue
-		}
-		if m.ModelLifecycle != nil && m.ModelLifecycle.Status == types.FoundationModelLifecycleStatusLegacy {
-			continue
-		}
-		usageMap[*m.ModelId] = modalitiesToUsage(m.OutputModalities)
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(body))}
 	}
-	return usageMap, nil
+
+	var models modelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+		return nil, fmt.Errorf("failed to decode Mantle models response: %w", err)
+	}
+	return filterMantleModels(models.Data), nil
 }
 
-// inferenceProfileUsage resolves the usage type for a profile by looking up the
-// underlying foundation model's output modalities. Returns "" if unknown.
-func inferenceProfileUsage(p types.InferenceProfileSummary, usageByModelID map[string]string) string {
-	for _, m := range p.Models {
-		if m.ModelArn == nil {
+func withDefaultTimeout(client *http.Client) *http.Client {
+	if client == nil {
+		return &http.Client{Timeout: defaultTimeout}
+	}
+	if client.Timeout != 0 {
+		return client
+	}
+	clientCopy := *client
+	clientCopy.Timeout = defaultTimeout
+	return &clientCopy
+}
+
+func filterMantleModels(models []Model) []Model {
+	filtered := make([]Model, 0, len(models))
+	for _, model := range models {
+		dialect := dialectForModel(model.ID)
+		if dialect == "" {
 			continue
 		}
-		modelID := modelIDFromARN(*m.ModelArn)
-		if usage, ok := usageByModelID[modelID]; ok {
-			return usage
+		if model.Object == "" {
+			model.Object = "model"
 		}
+		if model.Metadata == nil {
+			model.Metadata = map[string]string{}
+		}
+		model.Metadata["dialect"] = dialect
+		model.Metadata["usage"] = usageLLM
+		filtered = append(filtered, model)
 	}
-	return ""
+	return filtered
 }
 
-// modalitiesToUsage maps Bedrock output modalities to an Obot usage type string.
-func modalitiesToUsage(modalities []types.ModelModality) string {
-	for _, mod := range modalities {
-		switch mod {
-		case types.ModelModalityEmbedding:
-			return "text-embedding"
-		case types.ModelModalityImage:
-			return "image-generation"
-		}
+func dialectForModel(id string) string {
+	switch {
+	case strings.HasPrefix(id, "anthropic."):
+		return dialectAnthropicMessages
+	case strings.HasPrefix(id, "openai."), strings.HasPrefix(id, "google."):
+		return dialectOpenAIResponses
+	default:
+		return ""
 	}
-	return "llm"
 }
 
-// modelIDFromARN extracts the model ID from a Bedrock foundation model ARN.
-// Format: arn:aws:bedrock:{region}::foundation-model/{modelId}
-func modelIDFromARN(arn string) string {
-	if idx := strings.LastIndex(arn, "/"); idx >= 0 {
-		return arn[idx+1:]
+type StaticAuthTransport struct {
+	Auth StaticAuth
+	Next http.RoundTripper
+}
+
+func (t StaticAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := signRequest(req, t.Auth, time.Now()); err != nil {
+		return nil, err
 	}
-	return arn
+	next := t.Next
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	return next.RoundTrip(req)
+}
+
+type APIKeyTransport struct {
+	APIKey string
+	Next   http.RoundTripper
+}
+
+func (t APIKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Del("X-Api-Key")
+	req.Header.Set("Authorization", "Bearer "+t.APIKey)
+	next := t.Next
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	return next.RoundTrip(req)
+}
+
+func signRequest(req *http.Request, auth StaticAuth, signingTime time.Time) error {
+	if auth.Region == "" {
+		auth.Region = defaultRegion
+	}
+	if req.Body == nil {
+		req.Body = http.NoBody
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read request body for AWS signing: %w", err)
+	}
+	req.Body = io.NopCloser(bytes.NewReader(body))
+
+	sum := sha256.Sum256(body)
+	payloadHash := hex.EncodeToString(sum[:])
+	req.Header.Del("Authorization")
+	req.Header.Del("X-Api-Key")
+	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+
+	return v4signer.NewSigner().SignHTTP(req.Context(), aws.Credentials{
+		AccessKeyID:     auth.AccessKeyID,
+		SecretAccessKey: auth.SecretAccessKey,
+		SessionToken:    auth.SessionToken,
+	}, req, payloadHash, signingService, auth.Region, signingTime)
 }

@@ -9,12 +9,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/bedrock"
-	"github.com/aws/smithy-go/auth/bearer"
-	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/obot-platform/enterprise-providers/amazon-bedrock-model-provider/bedrockcommon"
-	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 func main() {
@@ -34,14 +29,6 @@ func main() {
 	}
 }
 
-type tokenProvider struct {
-	token string
-}
-
-func (t tokenProvider) RetrieveBearerToken(context.Context) (bearer.Token, error) {
-	return bearer.Token{Value: t.token}, nil
-}
-
 func mainErr(ctx context.Context, isValidate bool) error {
 	apiKey := os.Getenv("OBOT_AMAZON_BEDROCK_API_KEY_MODEL_PROVIDER_API_KEY")
 	if apiKey == "" {
@@ -53,29 +40,12 @@ func mainErr(ctx context.Context, isValidate bool) error {
 		region = "us-east-1"
 	}
 
-	awsCfg := aws.Config{
-		Region:                  region,
-		BearerAuthTokenProvider: tokenProvider{token: apiKey},
-	}
-	bedrockClient := bedrock.NewFromConfig(awsCfg)
+	client := &http.Client{Transport: bedrockcommon.APIKeyTransport{APIKey: apiKey}}
 
-	// Validate credentials by making a lightweight API call.
-	if _, err := bedrockClient.ListFoundationModels(ctx, &bedrock.ListFoundationModelsInput{}); err != nil {
+	// Validate credentials by making the same lightweight Mantle call used for discovery.
+	if _, err := bedrockcommon.ListMantleModels(ctx, client, region); err != nil {
 		return fmt.Errorf("failed to validate AWS credentials: %w", err)
 	}
-
-	handler, err := bifrostprovider.NewHandler(ctx, bifrostprovider.NewAccount(schemas.Bedrock, []schemas.Key{{
-		Models: schemas.WhiteList{"*"},
-		Weight: 1.0,
-		Value:  schemas.EnvVar{Val: apiKey},
-		BedrockKeyConfig: &schemas.BedrockKeyConfig{
-			Region: &schemas.EnvVar{Val: region},
-		},
-	}}), "amazon-bedrock-api-key-model-provider")
-	if err != nil {
-		return fmt.Errorf("failed to initialize bifrost: %w", err)
-	}
-	defer handler.Shutdown()
 
 	if isValidate {
 		return nil
@@ -94,7 +64,7 @@ func mainErr(ctx context.Context, isValidate bool) error {
 	})
 
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		models, err := bedrockcommon.ListInferenceProfiles(r.Context(), bedrockClient)
+		models, err := bedrockcommon.ListMantleModels(r.Context(), client, region)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to list models: %v", err), http.StatusInternalServerError)
 			return
@@ -107,8 +77,6 @@ func mainErr(ctx context.Context, isValidate bool) error {
 			log.Printf("Failed to encode models response: %v", err)
 		}
 	})
-
-	mux.HandleFunc("POST /v1/responses", handler.HandleResponses)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("404 %s %s", r.Method, r.URL.Path)
