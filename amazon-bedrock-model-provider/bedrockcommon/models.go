@@ -176,6 +176,9 @@ func signRequest(req *http.Request, auth StaticAuth, signingTime time.Time) erro
 	if err != nil {
 		return fmt.Errorf("failed to read request body for AWS signing: %w", err)
 	}
+	if err := req.Body.Close(); err != nil {
+		return fmt.Errorf("failed to close request body after AWS signing read: %w", err)
+	}
 	req.Body = io.NopCloser(bytes.NewReader(body))
 
 	sum := sha256.Sum256(body)
