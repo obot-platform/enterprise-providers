@@ -42,6 +42,15 @@ func TestValidationErrorMessageForHTTPError(t *testing.T) {
 			want: "Invalid Amazon Bedrock credentials: access was denied. Check that the credentials have Bedrock access and are configured for the selected region.",
 		},
 		{
+			name: "forbidden status takes precedence over invalid token body",
+			err: bedrockcommon.HTTPError{
+				StatusCode: http.StatusForbidden,
+				Status:     http.StatusText(http.StatusForbidden),
+				Body:       "invalid token",
+			},
+			want: "Invalid Amazon Bedrock credentials: access was denied. Check that the credentials have Bedrock access and are configured for the selected region.",
+		},
+		{
 			name: "body passthrough",
 			err: bedrockcommon.HTTPError{
 				StatusCode: http.StatusBadRequest,
