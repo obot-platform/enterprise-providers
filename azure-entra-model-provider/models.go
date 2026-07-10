@@ -17,7 +17,17 @@ type managementDeploymentsResponse struct {
 }
 
 type managementDeployment struct {
-	Name string `json:"name"`
+	Name       string                         `json:"name"`
+	Properties managementDeploymentProperties `json:"properties"`
+}
+
+type managementDeploymentProperties struct {
+	Model managementDeploymentModel `json:"model"`
+}
+
+type managementDeploymentModel struct {
+	Format string `json:"format"`
+	Name   string `json:"name"`
 }
 
 type tokenResponse struct {
@@ -28,7 +38,7 @@ type tokenResponse struct {
 }
 
 // fetchDeploymentsFromManagement lists actual deployments using the Azure Management API.
-func fetchDeploymentsFromManagement(ctx context.Context, subscriptionID, resourceGroup, resourceName, tenantID, clientID, clientSecret string) (map[string]string, error) {
+func fetchDeploymentsFromManagement(ctx context.Context, subscriptionID, resourceGroup, resourceName, tenantID, clientID, clientSecret string) (map[string]azurecommon.Deployment, error) {
 	token, err := getEntraTokenForScope(ctx, tenantID, clientID, clientSecret, "https://management.azure.com/.default")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get management token: %w", err)
@@ -45,7 +55,7 @@ func fetchDeploymentsFromManagement(ctx context.Context, subscriptionID, resourc
 }
 
 // fetchDeploymentsFromManagementURL fetches and parses deployments from a management API URL.
-func fetchDeploymentsFromManagementURL(ctx context.Context, mgmtURL, token string) (map[string]string, error) {
+func fetchDeploymentsFromManagementURL(ctx context.Context, mgmtURL, token string) (map[string]azurecommon.Deployment, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mgmtURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build management request: %w", err)
@@ -71,9 +81,20 @@ func fetchDeploymentsFromManagementURL(ctx context.Context, mgmtURL, token strin
 		return nil, fmt.Errorf("failed to decode management response: %w", err)
 	}
 
-	deployments := make(map[string]string, len(result.Value))
+	deployments := make(map[string]azurecommon.Deployment, len(result.Value))
 	for _, d := range result.Value {
-		deployments[d.Name] = azurecommon.DeploymentUsageType(d.Name)
+		dialect, ok := azurecommon.DialectForModelFormat(d.Properties.Model.Format)
+		if !ok {
+			continue
+		}
+		usageName := d.Properties.Model.Name
+		if usageName == "" {
+			usageName = d.Name
+		}
+		deployments[d.Name] = azurecommon.Deployment{
+			Usage:   azurecommon.DeploymentUsageType(usageName),
+			Dialect: dialect,
+		}
 	}
 	return deployments, nil
 }

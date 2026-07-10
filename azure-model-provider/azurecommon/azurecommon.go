@@ -9,6 +9,16 @@ import (
 	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
+const (
+	DialectOpenAIResponses   = "OpenAIResponses"
+	DialectAnthropicMessages = "AnthropicMessages"
+)
+
+type Deployment struct {
+	Usage   string
+	Dialect string
+}
+
 // azureEndpointSuffixes is an allowlist of recognized Azure OpenAI endpoint host suffixes.
 var azureEndpointSuffixes = []string{
 	".openai.azure.com",
@@ -57,16 +67,28 @@ func DeploymentUsageType(name string) string {
 	return "llm"
 }
 
-// BuildModelsFromDeployments converts a deploymentName->usageType map into a list
-// of OpenAI-compatible model objects.
-func BuildModelsFromDeployments(deployments map[string]string) []bifrostprovider.Model {
+// DialectForModelFormat maps the ARM deployment model format to a nanobot dialect.
+func DialectForModelFormat(format string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "openai":
+		return DialectOpenAIResponses, true
+	case "anthropic":
+		return DialectAnthropicMessages, true
+	default:
+		return "", false
+	}
+}
+
+// BuildModelsFromDeployments converts deployment metadata into model objects.
+func BuildModelsFromDeployments(deployments map[string]Deployment) []bifrostprovider.Model {
 	models := make([]bifrostprovider.Model, 0, len(deployments))
-	for deploymentName, usageType := range deployments {
+	for deploymentName, deployment := range deployments {
 		models = append(models, bifrostprovider.Model{
 			ID:     deploymentName,
 			Object: "model",
 			Metadata: map[string]string{
-				"usage": usageType,
+				"usage":   deployment.Usage,
+				"dialect": deployment.Dialect,
 			},
 		})
 	}

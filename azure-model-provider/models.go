@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/obot-platform/enterprise-providers/azure-model-provider/azurecommon"
 )
 
 // validUsageTypes is the set of recognized usage type values.
@@ -15,37 +17,47 @@ var validUsageTypes = map[string]struct{}{
 }
 
 // parseDeployments parses a comma-separated list of deployment specs.
-// Each spec is either "deploymentName" (defaults to usage type "llm") or
-// "deploymentName:usageType". The resulting map is deploymentName->usageType.
-func parseDeployments(s string) (map[string]string, error) {
-	deployments := make(map[string]string)
+// Each spec is deploymentName[:usageType[:dialect]]. Usage defaults to "llm"
+// and dialect defaults to OpenAIResponses.
+func parseDeployments(s string) (map[string]azurecommon.Deployment, error) {
+	deployments := make(map[string]azurecommon.Deployment)
 	for spec := range strings.SplitSeq(s, ",") {
 		spec = strings.TrimSpace(spec)
 		if spec == "" {
 			continue
 		}
 
-		parts := strings.SplitN(spec, ":", 2)
-		switch len(parts) {
-		case 1:
-			if err := validateName(parts[0]); err != nil {
-				return nil, fmt.Errorf("invalid deployment spec %q: %w", spec, err)
-			}
-			deployments[parts[0]] = "llm"
-		case 2:
-			deployment := strings.TrimSpace(parts[0])
-			usageType := strings.TrimSpace(parts[1])
+		parts := strings.Split(spec, ":")
+		if len(parts) > 3 {
+			return nil, fmt.Errorf("invalid deployment spec %q: expected deployment[:usage[:dialect]]", spec)
+		}
+		deployment := strings.TrimSpace(parts[0])
+		usageType := "llm"
+		dialect := azurecommon.DialectOpenAIResponses
+		if len(parts) >= 2 {
+			usageType = strings.TrimSpace(parts[1])
 			if deployment == "" || usageType == "" {
 				return nil, fmt.Errorf("invalid deployment spec %q: deployment name and usage type must be non-empty", spec)
 			}
-			if err := validateName(deployment); err != nil {
-				return nil, fmt.Errorf("invalid deployment spec %q: %w", spec, err)
-			}
-			if _, ok := validUsageTypes[usageType]; !ok {
-				return nil, fmt.Errorf("invalid deployment spec %q: usage type %q must be one of: llm, reasoning-llm, text-embedding, image-generation", spec, usageType)
-			}
-			deployments[deployment] = usageType
 		}
+		if err := validateName(deployment); err != nil {
+			return nil, fmt.Errorf("invalid deployment spec %q: %w", spec, err)
+		}
+		if _, ok := validUsageTypes[usageType]; !ok {
+			return nil, fmt.Errorf("invalid deployment spec %q: usage type %q must be one of: llm, reasoning-llm, text-embedding, image-generation", spec, usageType)
+		}
+		if len(parts) == 3 {
+			dialectName := strings.TrimSpace(parts[2])
+			switch dialectName {
+			case "openai":
+				dialect = azurecommon.DialectOpenAIResponses
+			case "anthropic":
+				dialect = azurecommon.DialectAnthropicMessages
+			default:
+				return nil, fmt.Errorf("invalid deployment spec %q: dialect %q must be one of: openai, anthropic", spec, dialectName)
+			}
+		}
+		deployments[deployment] = azurecommon.Deployment{Usage: usageType, Dialect: dialect}
 	}
 	if len(deployments) == 0 {
 		return nil, fmt.Errorf("no valid deployments found in %q", s)
