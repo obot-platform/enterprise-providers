@@ -21,7 +21,7 @@ func TestFetchDeploymentsFromManagement(t *testing.T) {
 		{
 			name: "single deployment",
 			response: managementDeploymentsResponse{Value: []managementDeployment{
-				{Name: "my-gpt4", Properties: managementDeploymentProperties{Model: managementDeploymentModel{Format: "OpenAI", Name: "gpt-4"}}},
+				{DeploymentName: "my-gpt4", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI", ModelName: "gpt-4"}}},
 			}},
 			statusCode: 200,
 			want: map[string]azurecommon.Deployment{
@@ -29,9 +29,9 @@ func TestFetchDeploymentsFromManagement(t *testing.T) {
 			},
 		},
 		{
-			name: "usage type inferred from deployment name",
+			name: "usage type inferred from model name",
 			response: managementDeploymentsResponse{Value: []managementDeployment{
-				{Name: "custom-deployment", Properties: managementDeploymentProperties{Model: managementDeploymentModel{Format: "OpenAI", Name: "text-embedding-ada-002"}}},
+				{DeploymentName: "custom-deployment", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI", ModelName: "text-embedding-ada-002"}}},
 			}},
 			statusCode: 200,
 			want: map[string]azurecommon.Deployment{
@@ -41,7 +41,7 @@ func TestFetchDeploymentsFromManagement(t *testing.T) {
 		{
 			name: "Anthropic model format",
 			response: managementDeploymentsResponse{Value: []managementDeployment{
-				{Name: "claude-deployment", Properties: managementDeploymentProperties{Model: managementDeploymentModel{Format: "Anthropic", Name: "claude-sonnet-4"}}},
+				{DeploymentName: "claude-deployment", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "Anthropic", ModelName: "claude-sonnet-4"}}},
 			}},
 			statusCode: 200,
 			want: map[string]azurecommon.Deployment{
@@ -51,8 +51,8 @@ func TestFetchDeploymentsFromManagement(t *testing.T) {
 		{
 			name: "two deployments of the same model",
 			response: managementDeploymentsResponse{Value: []managementDeployment{
-				{Name: "deploy-a", Properties: managementDeploymentProperties{Model: managementDeploymentModel{Format: "OpenAI"}}},
-				{Name: "deploy-b", Properties: managementDeploymentProperties{Model: managementDeploymentModel{Format: "OpenAI"}}},
+				{DeploymentName: "deploy-a", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI"}}},
+				{DeploymentName: "deploy-b", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI"}}},
 			}},
 			statusCode: 200,
 			want: map[string]azurecommon.Deployment{
@@ -63,8 +63,8 @@ func TestFetchDeploymentsFromManagement(t *testing.T) {
 		{
 			name: "unknown model format is omitted",
 			response: managementDeploymentsResponse{Value: []managementDeployment{
-				{Name: "known", Properties: managementDeploymentProperties{Model: managementDeploymentModel{Format: "OpenAI"}}},
-				{Name: "unknown", Properties: managementDeploymentProperties{Model: managementDeploymentModel{Format: "Meta"}}},
+				{DeploymentName: "known", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI"}}},
+				{DeploymentName: "unknown", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "Meta"}}},
 			}},
 			statusCode: 200,
 			want: map[string]azurecommon.Deployment{

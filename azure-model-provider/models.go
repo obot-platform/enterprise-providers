@@ -48,12 +48,9 @@ func parseDeployments(s string) (map[string]azurecommon.Deployment, error) {
 		}
 		if len(parts) == 3 {
 			dialectName := strings.TrimSpace(parts[2])
-			switch dialectName {
-			case "openai":
-				dialect = azurecommon.DialectOpenAIResponses
-			case "anthropic":
-				dialect = azurecommon.DialectAnthropicMessages
-			default:
+			var ok bool
+			dialect, ok = azurecommon.DialectForModelFormat(dialectName)
+			if !ok {
 				return nil, fmt.Errorf("invalid deployment spec %q: dialect %q must be one of: openai, anthropic", spec, dialectName)
 			}
 		}

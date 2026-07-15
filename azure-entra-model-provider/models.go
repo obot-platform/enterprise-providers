@@ -17,8 +17,8 @@ type managementDeploymentsResponse struct {
 }
 
 type managementDeployment struct {
-	Name       string                         `json:"name"`
-	Properties managementDeploymentProperties `json:"properties"`
+	DeploymentName string                         `json:"name"`
+	Properties     managementDeploymentProperties `json:"properties"`
 }
 
 type managementDeploymentProperties struct {
@@ -26,8 +26,8 @@ type managementDeploymentProperties struct {
 }
 
 type managementDeploymentModel struct {
-	Format string `json:"format"`
-	Name   string `json:"name"`
+	ProviderFormat string `json:"format"`
+	ModelName      string `json:"name"`
 }
 
 type tokenResponse struct {
@@ -83,15 +83,15 @@ func fetchDeploymentsFromManagementURL(ctx context.Context, mgmtURL, token strin
 
 	deployments := make(map[string]azurecommon.Deployment, len(result.Value))
 	for _, d := range result.Value {
-		dialect, ok := azurecommon.DialectForModelFormat(d.Properties.Model.Format)
+		dialect, ok := azurecommon.DialectForModelFormat(d.Properties.Model.ProviderFormat)
 		if !ok {
 			continue
 		}
-		usageName := d.Properties.Model.Name
+		usageName := d.Properties.Model.ModelName
 		if usageName == "" {
-			usageName = d.Name
+			usageName = d.DeploymentName
 		}
-		deployments[d.Name] = azurecommon.Deployment{
+		deployments[d.DeploymentName] = azurecommon.Deployment{
 			Usage:   azurecommon.DeploymentUsageType(usageName),
 			Dialect: dialect,
 		}
