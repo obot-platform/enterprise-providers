@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-
-	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 const (
@@ -17,6 +15,12 @@ const (
 type Deployment struct {
 	Usage   string
 	Dialect string
+}
+
+type Model struct {
+	ID       string            `json:"id"`
+	Object   string            `json:"object"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // azureEndpointSuffixes is an allowlist of recognized Azure OpenAI endpoint host suffixes.
@@ -80,10 +84,10 @@ func DialectForModelFormat(format string) (string, bool) {
 }
 
 // BuildModelsFromDeployments converts deployment metadata into model objects.
-func BuildModelsFromDeployments(deployments map[string]Deployment) []bifrostprovider.Model {
-	models := make([]bifrostprovider.Model, 0, len(deployments))
+func BuildModelsFromDeployments(deployments map[string]Deployment) []Model {
+	models := make([]Model, 0, len(deployments))
 	for deploymentName, deployment := range deployments {
-		models = append(models, bifrostprovider.Model{
+		models = append(models, Model{
 			ID:     deploymentName,
 			Object: "model",
 			Metadata: map[string]string{
