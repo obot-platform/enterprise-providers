@@ -21,8 +21,3 @@ requiredConfigurationParameters:
     friendlyName: "Deployments"
     description: "List of deployments (format: deployment[:usage[:dialect]]). Usage defaults to 'llm' and supports 'llm', 'reasoning-llm', 'text-embedding', or 'image-generation'. Dialect defaults to OpenAI and supports 'openai' or 'anthropic'."
     sensitive: false
-optionalConfigurationParameters:
-  - name: "OBOT_AZURE_MODEL_PROVIDER_API_VERSION"
-    friendlyName: "API Version"
-    description: "Azure API version (defaults to 2025-01-01-preview)"
-    sensitive: false

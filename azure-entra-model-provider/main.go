@@ -57,11 +57,6 @@ func mainErr(ctx context.Context, isValidate bool) error {
 		return errors.New("OBOT_AZURE_ENTRA_MODEL_PROVIDER_TENANT_ID not found")
 	}
 
-	apiVersion := os.Getenv("OBOT_AZURE_ENTRA_MODEL_PROVIDER_API_VERSION")
-	if apiVersion == "" {
-		apiVersion = "2025-01-01-preview"
-	}
-
 	subscriptionID := os.Getenv("OBOT_AZURE_ENTRA_MODEL_PROVIDER_SUBSCRIPTION_ID")
 	if subscriptionID == "" {
 		return errors.New("OBOT_AZURE_ENTRA_MODEL_PROVIDER_SUBSCRIPTION_ID not found")
@@ -81,13 +76,11 @@ func mainErr(ctx context.Context, isValidate bool) error {
 		return fmt.Errorf("failed to fetch deployments from Azure: %w", err)
 	}
 
-	apiVersionEnvVar := schemas.EnvVar{Val: apiVersion}
 	handler, err := bifrostprovider.NewHandler(ctx, bifrostprovider.NewAccount(schemas.Azure, []schemas.Key{{
 		Models: schemas.WhiteList{"*"},
 		Weight: 1.0,
 		AzureKeyConfig: &schemas.AzureKeyConfig{
 			Endpoint:     schemas.EnvVar{Val: endpoint},
-			APIVersion:   &apiVersionEnvVar,
 			ClientID:     &schemas.EnvVar{Val: clientID},
 			ClientSecret: &schemas.EnvVar{Val: clientSecret},
 			TenantID:     &schemas.EnvVar{Val: tenantID},

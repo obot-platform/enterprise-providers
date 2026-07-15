@@ -18,6 +18,8 @@ import (
 	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
+const azureAPIVersion = "2024-10-21"
+
 func main() {
 	isValidate := len(os.Args) > 1 && os.Args[1] == "validate"
 	if err := mainErr(context.Background(), isValidate); err != nil {
@@ -50,11 +52,6 @@ func mainErr(ctx context.Context, isValidate bool) error {
 		return errors.New("OBOT_AZURE_MODEL_PROVIDER_API_KEY not found")
 	}
 
-	apiVersion := os.Getenv("OBOT_AZURE_MODEL_PROVIDER_API_VERSION")
-	if apiVersion == "" {
-		apiVersion = "2025-01-01-preview"
-	}
-
 	deploymentsStr := os.Getenv("OBOT_AZURE_MODEL_PROVIDER_DEPLOYMENTS")
 	if deploymentsStr == "" {
 		return errors.New("OBOT_AZURE_MODEL_PROVIDER_DEPLOYMENTS not found")
@@ -71,7 +68,7 @@ func mainErr(ctx context.Context, isValidate bool) error {
 		return fmt.Errorf("failed to build models response: %w", err)
 	}
 
-	if err := validateCredentials(ctx, endpoint, apiKey, apiVersion); err != nil {
+	if err := validateCredentials(ctx, endpoint, apiKey); err != nil {
 		return fmt.Errorf("failed to validate Azure credentials: %w", err)
 	}
 
@@ -79,14 +76,12 @@ func mainErr(ctx context.Context, isValidate bool) error {
 		return nil
 	}
 
-	apiVersionEnvVar := schemas.EnvVar{Val: apiVersion}
 	handler, err := bifrostprovider.NewHandler(ctx, bifrostprovider.NewAccount(schemas.Azure, []schemas.Key{{
 		Models: schemas.WhiteList{"*"},
 		Weight: 1.0,
 		Value:  schemas.EnvVar{Val: apiKey},
 		AzureKeyConfig: &schemas.AzureKeyConfig{
-			Endpoint:   schemas.EnvVar{Val: endpoint},
-			APIVersion: &apiVersionEnvVar,
+			Endpoint: schemas.EnvVar{Val: endpoint},
 		},
 	}}), "azure-model-provider")
 	if err != nil {
@@ -131,14 +126,14 @@ func mainErr(ctx context.Context, isValidate bool) error {
 }
 
 // validateCredentials checks that the API key is accepted by the Azure OpenAI endpoint.
-func validateCredentials(ctx context.Context, endpoint, apiKey, apiVersion string) error {
+func validateCredentials(ctx context.Context, endpoint, apiKey string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return fmt.Errorf("failed to parse endpoint URL: %w", err)
 	}
 	u = u.JoinPath("/openai/models")
 	q := u.Query()
-	q.Set("api-version", apiVersion)
+	q.Set("api-version", azureAPIVersion)
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
