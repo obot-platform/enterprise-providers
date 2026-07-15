@@ -10,9 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/obot-platform/enterprise-providers/azure-model-provider/azurecommon"
-	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 func main() {
@@ -76,21 +74,6 @@ func mainErr(ctx context.Context, isValidate bool) error {
 		return fmt.Errorf("failed to fetch deployments from Azure: %w", err)
 	}
 
-	handler, err := bifrostprovider.NewHandler(ctx, bifrostprovider.NewAccount(schemas.Azure, []schemas.Key{{
-		Models: schemas.WhiteList{"*"},
-		Weight: 1.0,
-		AzureKeyConfig: &schemas.AzureKeyConfig{
-			Endpoint:     schemas.EnvVar{Val: endpoint},
-			ClientID:     &schemas.EnvVar{Val: clientID},
-			ClientSecret: &schemas.EnvVar{Val: clientSecret},
-			TenantID:     &schemas.EnvVar{Val: tenantID},
-		},
-	}}), "azure-entra-model-provider")
-	if err != nil {
-		return fmt.Errorf("failed to initialize bifrost: %w", err)
-	}
-	defer handler.Shutdown()
-
 	if isValidate {
 		return nil
 	}
@@ -122,8 +105,6 @@ func mainErr(ctx context.Context, isValidate bool) error {
 			log.Printf("Failed to encode models response: %v", err)
 		}
 	})
-
-	mux.HandleFunc("POST /v1/responses", handler.HandleResponses)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("404 %s %s", r.Method, r.URL.Path)

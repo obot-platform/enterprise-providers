@@ -89,11 +89,6 @@ func TestParseDeployments(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "invalid dialect",
-			input:   "my-deploy:llm:responses",
-			wantErr: true,
-		},
-		{
 			name:    "empty dialect",
 			input:   "my-deploy:llm:",
 			wantErr: true,

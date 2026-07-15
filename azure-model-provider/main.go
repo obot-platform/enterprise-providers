@@ -13,9 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/obot-platform/enterprise-providers/azure-model-provider/azurecommon"
-	bifrostprovider "github.com/obot-platform/enterprise-providers/bifrost-model-provider"
 )
 
 const azureAPIVersion = "2024-10-21"
@@ -76,19 +74,6 @@ func mainErr(ctx context.Context, isValidate bool) error {
 		return nil
 	}
 
-	handler, err := bifrostprovider.NewHandler(ctx, bifrostprovider.NewAccount(schemas.Azure, []schemas.Key{{
-		Models: schemas.WhiteList{"*"},
-		Weight: 1.0,
-		Value:  schemas.EnvVar{Val: apiKey},
-		AzureKeyConfig: &schemas.AzureKeyConfig{
-			Endpoint: schemas.EnvVar{Val: endpoint},
-		},
-	}}), "azure-model-provider")
-	if err != nil {
-		return fmt.Errorf("failed to initialize bifrost: %w", err)
-	}
-	defer handler.Shutdown()
-
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8000"
@@ -107,8 +92,6 @@ func mainErr(ctx context.Context, isValidate bool) error {
 			log.Printf("Failed to write models response: %v", err)
 		}
 	})
-
-	mux.HandleFunc("POST /v1/responses", handler.HandleResponses)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("404 %s %s", r.Method, r.URL.Path)
