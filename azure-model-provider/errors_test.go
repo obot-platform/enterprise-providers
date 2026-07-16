@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"testing"
@@ -25,6 +26,25 @@ func TestValidationErrorMessageForInvalidHost(t *testing.T) {
 	})
 	message := validationErrorMessage(err)
 	if got, want := message, "Invalid Azure endpoint: host calvin-testing-tempz.cognitiveservices.azure.com was not found. Check the endpoint URL."; got != want {
+		t.Fatalf("validation error = %q, want %q", got, want)
+	}
+}
+
+func TestValidationErrorMessageForInvalidDeployments(t *testing.T) {
+	t.Setenv("OBOT_AZURE_MODEL_PROVIDER_ENDPOINT", "https://example.openai.azure.com")
+	t.Setenv("OBOT_AZURE_MODEL_PROVIDER_API_KEY", "unused")
+	t.Setenv("OBOT_AZURE_MODEL_PROVIDER_DEPLOYMENTS", "claude-haiku-4-5:lflm:anthropic")
+
+	err := mainErr(context.Background(), true)
+	message := validationErrorMessage(err)
+	if got, want := message, `invalid deployment spec "claude-haiku-4-5:lflm:anthropic": usage type "lflm" must be one of: llm, reasoning-llm, text-embedding, image-generation`; got != want {
+		t.Fatalf("validation error = %q, want %q", got, want)
+	}
+}
+
+func TestValidationErrorMessageForUnknownError(t *testing.T) {
+	message := validationErrorMessage(fmt.Errorf("unexpected internal detail"))
+	if got, want := message, "Invalid Azure credentials."; got != want {
 		t.Fatalf("validation error = %q, want %q", got, want)
 	}
 }

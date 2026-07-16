@@ -56,7 +56,7 @@ func mainErr(ctx context.Context, isValidate bool) error {
 	}
 	deployments, err := parseDeployments(deploymentsStr)
 	if err != nil {
-		return fmt.Errorf("invalid OBOT_AZURE_MODEL_PROVIDER_DEPLOYMENTS: %w", err)
+		return &configurationError{err: err}
 	}
 	modelsResp, err := json.Marshal(map[string]any{
 		"object": "list",

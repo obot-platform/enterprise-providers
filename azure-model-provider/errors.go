@@ -24,6 +24,18 @@ type azureAPIError struct {
 	Message    string
 }
 
+type configurationError struct {
+	err error
+}
+
+func (e *configurationError) Error() string {
+	return e.err.Error()
+}
+
+func (e *configurationError) Unwrap() error {
+	return e.err
+}
+
 func (e *azureAPIError) Error() string {
 	switch {
 	case e.Message != "" && e.Code != "":
@@ -38,6 +50,10 @@ func (e *azureAPIError) Error() string {
 }
 
 func validationErrorMessage(err error) string {
+	if configErr, ok := errors.AsType[*configurationError](err); ok {
+		return configErr.Error()
+	}
+
 	if apiErr, ok := errors.AsType[*azureAPIError](err); ok {
 		switch {
 		case apiErr.StatusCode == http.StatusUnauthorized || apiErr.Code == "401":
