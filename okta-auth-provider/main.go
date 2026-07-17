@@ -23,15 +23,18 @@ import (
 )
 
 type Options struct {
-	ClientID                 string `env:"OBOT_OKTA_AUTH_PROVIDER_CLIENT_ID"`
-	ClientSecret             string `env:"OBOT_OKTA_AUTH_PROVIDER_CLIENT_SECRET"`
-	IssuerURL                string `env:"OBOT_OKTA_AUTH_PROVIDER_ISSUER_URL"`
-	ObotServerURL            string `env:"OBOT_SERVER_PUBLIC_URL,OBOT_SERVER_URL"`
-	PostgresConnectionDSN    string `env:"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN" optional:"true"`
-	AuthCookieSecret         string `usage:"Secret used to encrypt cookie" env:"OBOT_AUTH_PROVIDER_COOKIE_SECRET"`
-	AuthEmailDomains         string `usage:"Email domains allowed for authentication" default:"*" env:"OBOT_AUTH_PROVIDER_EMAIL_DOMAINS"`
-	LoggingEnabled           string `usage:"Enable oauth2-proxy logging" optional:"true" env:"OBOT_AUTH_PROVIDER_ENABLE_LOGGING"`
-	AuthTokenRefreshDuration string `usage:"Duration to refresh auth token after" optional:"true" default:"1h" env:"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"`
+	ClientID                          string `env:"OBOT_OKTA_AUTH_PROVIDER_CLIENT_ID"`
+	ClientSecret                      string `env:"OBOT_OKTA_AUTH_PROVIDER_CLIENT_SECRET"`
+	IssuerURL                         string `env:"OBOT_OKTA_AUTH_PROVIDER_ISSUER_URL"`
+	ObotServerURL                     string `env:"OBOT_SERVER_PUBLIC_URL,OBOT_SERVER_URL"`
+	PostgresConnectionDSN             string `env:"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN" optional:"true"`
+	PostgresMaxConnections            int    `env:"OBOT_AUTH_PROVIDER_POSTGRES_MAX_CONNECTIONS" optional:"true"`
+	PostgresMaxIdleConnections        int    `env:"OBOT_AUTH_PROVIDER_POSTGRES_MAX_IDLE_CONNECTIONS" optional:"true"`
+	PostgresConnectionLifetimeSeconds int    `env:"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_LIFETIME_SECONDS" optional:"true"`
+	AuthCookieSecret                  string `usage:"Secret used to encrypt cookie" env:"OBOT_AUTH_PROVIDER_COOKIE_SECRET"`
+	AuthEmailDomains                     string `usage:"Email domains allowed for authentication" default:"*" env:"OBOT_AUTH_PROVIDER_EMAIL_DOMAINS"`
+	LoggingEnabled                       string `usage:"Enable oauth2-proxy logging" optional:"true" env:"OBOT_AUTH_PROVIDER_ENABLE_LOGGING"`
+	AuthTokenRefreshDuration             string `usage:"Duration to refresh auth token after" optional:"true" default:"1h" env:"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"`
 
 	// These two are marked optional to make it easier for people to migrate from before they were added, to after they were added.
 	// They are still enforced as required by the Obot API.
@@ -88,6 +91,9 @@ func main() {
 	if opts.PostgresConnectionDSN != "" {
 		oauthProxyOpts.Session.Type = options.PostgresSessionStoreType
 		oauthProxyOpts.Session.Postgres.ConnectionDSN = opts.PostgresConnectionDSN
+		oauthProxyOpts.Session.Postgres.MaxOpenConns = opts.PostgresMaxConnections
+		oauthProxyOpts.Session.Postgres.MaxIdleConns = opts.PostgresMaxIdleConnections
+		oauthProxyOpts.Session.Postgres.ConnMaxLifetime = opts.PostgresConnectionLifetimeSeconds
 		oauthProxyOpts.Session.Postgres.TableNamePrefix = "okta_"
 	}
 	oauthProxyOpts.Cookie.Refresh = refreshDuration
