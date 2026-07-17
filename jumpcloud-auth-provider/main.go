@@ -22,21 +22,24 @@ import (
 )
 
 type Options struct {
-	ClientID                   string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_CLIENT_ID"`
-	ClientSecret               string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_CLIENT_SECRET"`
-	IssuerURL                  string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_ISSUER_URL" default:"https://oauth.id.jumpcloud.com/"`
-	APIKey                     string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_API_KEY" optional:"true"`
-	APIBaseURL                 string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_API_BASE_URL" optional:"true" default:"https://console.jumpcloud.com"`
-	APIOrgID                   string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_API_ORG_ID" optional:"true"`
-	ServiceAccountClientID     string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_SERVICE_ACCOUNT_CLIENT_ID" optional:"true"`
-	ServiceAccountClientSecret string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_SERVICE_ACCOUNT_CLIENT_SECRET" optional:"true"`
-	ServiceAccountTokenURL     string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_SERVICE_ACCOUNT_TOKEN_URL" optional:"true" default:"https://admin-oauth.id.jumpcloud.com/oauth2/token"`
-	ObotServerURL              string `env:"OBOT_SERVER_PUBLIC_URL,OBOT_SERVER_URL"`
-	PostgresConnectionDSN      string `env:"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN" optional:"true"`
-	AuthCookieSecret           string `usage:"Secret used to encrypt cookie" env:"OBOT_AUTH_PROVIDER_COOKIE_SECRET"`
-	AuthEmailDomains           string `usage:"Email domains allowed for authentication" default:"*" env:"OBOT_AUTH_PROVIDER_EMAIL_DOMAINS"`
-	AuthTokenRefreshDuration   string `usage:"Duration to refresh auth token after" optional:"true" default:"1h" env:"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"`
-	LoggingEnabled             string `usage:"Enable oauth2-proxy logging" optional:"true" env:"OBOT_AUTH_PROVIDER_ENABLE_LOGGING"`
+	ClientID                          string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_CLIENT_ID"`
+	ClientSecret                      string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_CLIENT_SECRET"`
+	IssuerURL                         string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_ISSUER_URL" default:"https://oauth.id.jumpcloud.com/"`
+	APIKey                            string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_API_KEY" optional:"true"`
+	APIBaseURL                        string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_API_BASE_URL" optional:"true" default:"https://console.jumpcloud.com"`
+	APIOrgID                          string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_API_ORG_ID" optional:"true"`
+	ServiceAccountClientID            string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_SERVICE_ACCOUNT_CLIENT_ID" optional:"true"`
+	ServiceAccountClientSecret        string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_SERVICE_ACCOUNT_CLIENT_SECRET" optional:"true"`
+	ServiceAccountTokenURL            string `env:"OBOT_JUMPCLOUD_AUTH_PROVIDER_SERVICE_ACCOUNT_TOKEN_URL" optional:"true" default:"https://admin-oauth.id.jumpcloud.com/oauth2/token"`
+	ObotServerURL                     string `env:"OBOT_SERVER_PUBLIC_URL,OBOT_SERVER_URL"`
+	PostgresConnectionDSN             string `env:"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN" optional:"true"`
+	PostgresMaxConnections            int    `env:"OBOT_AUTH_PROVIDER_POSTGRES_MAX_CONNECTIONS" optional:"true"`
+	PostgresMaxIdleConnections        int    `env:"OBOT_AUTH_PROVIDER_POSTGRES_MAX_IDLE_CONNECTIONS" optional:"true"`
+	PostgresConnectionLifetimeSeconds int    `env:"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_LIFETIME_SECONDS" optional:"true"`
+	AuthCookieSecret                  string `usage:"Secret used to encrypt cookie" env:"OBOT_AUTH_PROVIDER_COOKIE_SECRET"`
+	AuthEmailDomains                     string `usage:"Email domains allowed for authentication" default:"*" env:"OBOT_AUTH_PROVIDER_EMAIL_DOMAINS"`
+	AuthTokenRefreshDuration             string `usage:"Duration to refresh auth token after" optional:"true" default:"1h" env:"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"`
+	LoggingEnabled                       string `usage:"Enable oauth2-proxy logging" optional:"true" env:"OBOT_AUTH_PROVIDER_ENABLE_LOGGING"`
 }
 
 type server struct {
@@ -91,6 +94,9 @@ func main() {
 	if opts.PostgresConnectionDSN != "" {
 		oauthProxyOpts.Session.Type = options.PostgresSessionStoreType
 		oauthProxyOpts.Session.Postgres.ConnectionDSN = opts.PostgresConnectionDSN
+		oauthProxyOpts.Session.Postgres.MaxOpenConns = opts.PostgresMaxConnections
+		oauthProxyOpts.Session.Postgres.MaxIdleConns = opts.PostgresMaxIdleConnections
+		oauthProxyOpts.Session.Postgres.ConnMaxLifetime = opts.PostgresConnectionLifetimeSeconds
 		oauthProxyOpts.Session.Postgres.TableNamePrefix = "jumpcloud_"
 	}
 	oauthProxyOpts.Cookie.Refresh = refreshDuration

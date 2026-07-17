@@ -10,7 +10,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/microsoftgraph/msgraph-sdk-go v1.79.0
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
-	github.com/obot-platform/providers/auth-providers-common v0.0.0-20260605221712-d90e9d6df0eb
+	github.com/obot-platform/providers/auth-providers-common v0.0.0-20260717172559-9ab827189ee6
 	github.com/sahilm/fuzzy v0.1.1
 )
 
