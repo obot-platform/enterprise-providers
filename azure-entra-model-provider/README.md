@@ -37,12 +37,6 @@ az cognitiveservices account show \
 | `OBOT_AZURE_ENTRA_MODEL_PROVIDER_RESOURCE_GROUP` | Resource group containing the account | `my-resource-group` |
 | `OBOT_AZURE_ENTRA_MODEL_PROVIDER_RESOURCE_NAME` | Cognitive Services account name | `my-openai-account` |
 
-### Optional
-
-| Variable | Description | Default |
-|---|---|---|
-| `OBOT_AZURE_ENTRA_MODEL_PROVIDER_API_VERSION` | Azure OpenAI API version | `2025-01-01-preview` |
-
 ## How deployment discovery works
 
 On startup, the provider calls the Azure Management API to list deployments in the configured Cognitive Services account:

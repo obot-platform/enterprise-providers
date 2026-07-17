@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/obot-platform/enterprise-providers/azure-model-provider/azurecommon"
 )
 
 func TestFetchDeploymentsFromManagement(t *testing.T) {
@@ -14,32 +16,60 @@ func TestFetchDeploymentsFromManagement(t *testing.T) {
 		response   managementDeploymentsResponse
 		statusCode int
 		wantErr    bool
-		want       map[string]string
+		want       map[string]azurecommon.Deployment
 	}{
 		{
 			name: "single deployment",
 			response: managementDeploymentsResponse{Value: []managementDeployment{
-				{Name: "my-gpt4"},
+				{DeploymentName: "my-gpt4", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI", ModelName: "gpt-4"}}},
 			}},
 			statusCode: 200,
-			want:       map[string]string{"my-gpt4": "llm"},
+			want: map[string]azurecommon.Deployment{
+				"my-gpt4": {Usage: "llm", Dialect: azurecommon.DialectOpenAIResponses},
+			},
 		},
 		{
-			name: "usage type inferred from deployment name",
+			name: "usage type inferred from model name",
 			response: managementDeploymentsResponse{Value: []managementDeployment{
-				{Name: "text-embedding-ada-002"},
+				{DeploymentName: "custom-deployment", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI", ModelName: "text-embedding-ada-002"}}},
 			}},
 			statusCode: 200,
-			want:       map[string]string{"text-embedding-ada-002": "text-embedding"},
+			want: map[string]azurecommon.Deployment{
+				"custom-deployment": {Usage: "text-embedding", Dialect: azurecommon.DialectOpenAIResponses},
+			},
+		},
+		{
+			name: "Anthropic model format",
+			response: managementDeploymentsResponse{Value: []managementDeployment{
+				{DeploymentName: "claude-deployment", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "Anthropic", ModelName: "claude-sonnet-4"}}},
+			}},
+			statusCode: 200,
+			want: map[string]azurecommon.Deployment{
+				"claude-deployment": {Usage: "llm", Dialect: azurecommon.DialectAnthropicMessages},
+			},
 		},
 		{
 			name: "two deployments of the same model",
 			response: managementDeploymentsResponse{Value: []managementDeployment{
-				{Name: "deploy-a"},
-				{Name: "deploy-b"},
+				{DeploymentName: "deploy-a", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI"}}},
+				{DeploymentName: "deploy-b", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI"}}},
 			}},
 			statusCode: 200,
-			want:       map[string]string{"deploy-a": "llm", "deploy-b": "llm"},
+			want: map[string]azurecommon.Deployment{
+				"deploy-a": {Usage: "llm", Dialect: azurecommon.DialectOpenAIResponses},
+				"deploy-b": {Usage: "llm", Dialect: azurecommon.DialectOpenAIResponses},
+			},
+		},
+		{
+			name: "unknown model format is omitted",
+			response: managementDeploymentsResponse{Value: []managementDeployment{
+				{DeploymentName: "known", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "OpenAI"}}},
+				{DeploymentName: "unknown", Properties: managementDeploymentProperties{Model: managementDeploymentModel{ProviderFormat: "Meta"}}},
+			}},
+			statusCode: 200,
+			want: map[string]azurecommon.Deployment{
+				"known": {Usage: "llm", Dialect: azurecommon.DialectOpenAIResponses},
+			},
 		},
 		{
 			name:       "non-200 response returns error",
@@ -49,7 +79,7 @@ func TestFetchDeploymentsFromManagement(t *testing.T) {
 		{
 			name:       "empty deployment list",
 			statusCode: 200,
-			want:       map[string]string{},
+			want:       map[string]azurecommon.Deployment{},
 		},
 	}
 

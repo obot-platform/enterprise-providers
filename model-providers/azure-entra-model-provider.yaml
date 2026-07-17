@@ -37,9 +37,3 @@ requiredConfigurationParameters:
     friendlyName: "Resource Name"
     description: "Azure Cognitive Services resource name"
     sensitive: false
-optionalConfigurationParameters:
-  - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_API_VERSION"
-    friendlyName: "API Version"
-    description: "Azure API version (defaults to 2025-01-01-preview)"
-    sensitive: false
-dialect: "BifrostRequest"
