@@ -19,7 +19,7 @@ on:
       - providers
 
 jobs:
-  enterprise-build:
+  build:
     runs-on: depot-ubuntu-22.04
     concurrency:
       group: enterprise-providers-build
