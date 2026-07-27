@@ -1,0 +1,18 @@
+
+# Dependabot dependency ownership
+/amazon-bedrock-api-key-model-provider/go.mod @obot-platform/obot-backend
+/amazon-bedrock-api-key-model-provider/go.sum @obot-platform/obot-backend
+/amazon-bedrock-model-provider/go.mod @obot-platform/obot-backend
+/amazon-bedrock-model-provider/go.sum @obot-platform/obot-backend
+/auth0-auth-provider/go.mod @obot-platform/obot-backend
+/auth0-auth-provider/go.sum @obot-platform/obot-backend
+/azure-entra-model-provider/go.mod @obot-platform/obot-backend
+/azure-model-provider/go.mod @obot-platform/obot-backend
+/entra-auth-provider/go.mod @obot-platform/obot-backend
+/entra-auth-provider/go.sum @obot-platform/obot-backend
+/gemini-vertex-model-provider/go.mod @obot-platform/obot-backend
+/gemini-vertex-model-provider/go.sum @obot-platform/obot-backend
+/jumpcloud-auth-provider/go.mod @obot-platform/obot-backend
+/jumpcloud-auth-provider/go.sum @obot-platform/obot-backend
+/okta-auth-provider/go.mod @obot-platform/obot-backend
+/okta-auth-provider/go.sum @obot-platform/obot-backend
