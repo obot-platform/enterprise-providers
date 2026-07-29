@@ -5,8 +5,6 @@ validateArgs:
 icon: "/admin/assets/amazon-bedrock.png"
 description: "Model provider for Amazon Bedrock models using API key authentication"
 link: "https://aws.amazon.com/bedrock/"
-requiredEntitlements:
-  - "OBOT_ENTERPRISE_MODEL_PROVIDERS"
 requiredConfigurationParameters:
   - name: "OBOT_AMAZON_BEDROCK_API_KEY_MODEL_PROVIDER_API_KEY"
     friendlyName: "API Key"

@@ -6,8 +6,6 @@ icon: "/admin/assets/azure_openai_icon.svg"
 iconDark: "/admin/assets/azure_openai_icon.svg"
 description: "Model provider for Azure OpenAI/Foundry models using Entra ID service principal authentication"
 link: "https://azure.microsoft.com/en-us/products/ai-services/openai-service"
-requiredEntitlements:
-  - "OBOT_ENTERPRISE_MODEL_PROVIDERS"
 requiredConfigurationParameters:
   - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_ENDPOINT"
     friendlyName: "Azure Endpoint"

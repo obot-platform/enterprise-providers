@@ -23,10 +23,10 @@ import (
 )
 
 type Options struct {
-	ClientID                             string `env:"OBOT_AUTH0_AUTH_PROVIDER_CLIENT_ID"`
-	ClientSecret                         string `env:"OBOT_AUTH0_AUTH_PROVIDER_CLIENT_SECRET"`
-	Domain                               string `env:"OBOT_AUTH0_AUTH_PROVIDER_DOMAIN"`
-	ObotServerURL                        string `env:"OBOT_SERVER_PUBLIC_URL,OBOT_SERVER_URL"`
+	ClientID                          string `env:"OBOT_AUTH0_AUTH_PROVIDER_CLIENT_ID"`
+	ClientSecret                      string `env:"OBOT_AUTH0_AUTH_PROVIDER_CLIENT_SECRET"`
+	Domain                            string `env:"OBOT_AUTH0_AUTH_PROVIDER_DOMAIN"`
+	ObotServerURL                     string `env:"OBOT_SERVER_PUBLIC_URL,OBOT_SERVER_URL"`
 	PostgresConnectionDSN             string `env:"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN" optional:"true"`
 	PostgresMaxConnections            int    `env:"OBOT_AUTH_PROVIDER_POSTGRES_MAX_CONNECTIONS" optional:"true"`
 	PostgresMaxIdleConnections        int    `env:"OBOT_AUTH_PROVIDER_POSTGRES_MAX_IDLE_CONNECTIONS" optional:"true"`
