@@ -6,8 +6,6 @@ icon: "/admin/assets/gemini_icon.svg"
 iconDark: "/admin/assets/gemini_icon.svg"
 description: "Model provider for Google Gemini Vertex AI"
 link: "https://cloud.google.com/vertex-ai"
-requiredEntitlements:
-  - "OBOT_ENTERPRISE_MODEL_PROVIDERS"
 requiredConfigurationParameters:
   - name: "OBOT_GEMINI_VERTEX_MODEL_PROVIDER_GOOGLE_CREDENTIALS_JSON"
     friendlyName: "Google Credentials JSON"
