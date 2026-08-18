@@ -4,13 +4,21 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	msgraphsdkgo "github.com/microsoftgraph/msgraph-sdk-go"
+	msgraphcore "github.com/microsoftgraph/msgraph-sdk-go-core"
+	"github.com/microsoftgraph/msgraph-sdk-go/groups"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
+)
+
+const (
+	graphPageSize = 999
+	maxGroups     = 100000
 )
 
 // UserInfo represents basic user profile information.
@@ -25,24 +33,40 @@ type UserInfo struct {
 // Cache keys: "user:<userID>" or "group:<groupID>"
 var photoCache = expirable.NewLRU[string, string](1000, nil, time.Hour)
 
-// FetchGroupInfos retrieves all groups.
-// Includes profile photos if the client has sufficient permissions.
+// FetchGroupInfos retrieves every group in the tenant, following Graph's @odata.nextLink through
+// all pages.
 func FetchGroupInfos(ctx context.Context, client *msgraphsdkgo.GraphServiceClient) (state.GroupInfoList, error) {
-	result, err := client.Groups().Get(ctx, nil)
+	top := int32(graphPageSize)
+	result, err := client.Groups().Get(ctx, &groups.GroupsRequestBuilderGetRequestConfiguration{
+		QueryParameters: &groups.GroupsRequestBuilderGetQueryParameters{
+			Top: &top,
+			// Only these two fields are used; the default group object is far larger.
+			Select: []string{"id", "displayName"},
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch groups: %w", err)
 	}
 
-	var groupInfos state.GroupInfoList
-	if result != nil && result.GetValue() != nil {
-		for _, item := range result.GetValue() {
-			if group, ok := item.(*models.Group); ok {
-				groupInfo := convertToGroupInfo(group)
-				if groupInfo != nil {
-					groupInfos = append(groupInfos, *groupInfo)
-				}
-			}
+	pageIterator, err := msgraphcore.NewPageIterator[*models.Group](
+		result, client.GetAdapter(), models.CreateGroupCollectionResponseFromDiscriminatorValue,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create group page iterator: %w", err)
+	}
+
+	groupInfos := make(state.GroupInfoList, 0, graphPageSize)
+	if err := pageIterator.Iterate(ctx, func(group *models.Group) bool {
+		if groupInfo := convertToGroupInfo(group); groupInfo != nil {
+			groupInfos = append(groupInfos, *groupInfo)
 		}
+		if len(groupInfos) >= maxGroups {
+			slog.Warn("Reached the maximum number of Entra groups that can be listed; some groups were not loaded", "groupLimit", maxGroups)
+			return false
+		}
+		return true
+	}); err != nil {
+		return nil, fmt.Errorf("failed to page through groups: %w", err)
 	}
 
 	return groupInfos, nil
@@ -52,19 +76,20 @@ func FetchGroupInfos(ctx context.Context, client *msgraphsdkgo.GraphServiceClien
 // Uses transitive membership to include nested groups.
 // Requires application permission User.Read.All.
 func FetchUserGroupInfos(ctx context.Context, client *msgraphsdkgo.GraphServiceClient, userID string) (state.GroupInfoList, error) {
-	var (
-		groupInfos state.GroupInfoList
-		result     models.DirectoryObjectCollectionResponseable
-		err        error
-	)
+	top := int32(graphPageSize)
+	cfg := &users.ItemTransitiveMemberOfRequestBuilderGetRequestConfiguration{
+		QueryParameters: &users.ItemTransitiveMemberOfRequestBuilderGetQueryParameters{
+			Top: &top,
+		},
+	}
 
 	// Query user-specific endpoint with user ID (GUID or UPN/email)
-	result, err = client.Users().ByUserId(userID).TransitiveMemberOf().Get(ctx, nil)
-	if err != nil || result == nil || result.GetValue() == nil || len(result.GetValue()) == 0 {
+	result, err := client.Users().ByUserId(userID).TransitiveMemberOf().Get(ctx, cfg)
+	if err != nil || result == nil || len(result.GetValue()) == 0 {
 		// The user is likely a guest user if that did not work, so look up their email to get the proper user ID.
-		newUser, err := lookupGuestByEmail(ctx, client, userID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to lookup user %s: %w", userID, err)
+		newUser, lookupErr := lookupGuestByEmail(ctx, client, userID)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("failed to lookup user %s: %w", userID, lookupErr)
 		}
 
 		if newUser.GetId() == nil {
@@ -72,20 +97,34 @@ func FetchUserGroupInfos(ctx context.Context, client *msgraphsdkgo.GraphServiceC
 			return nil, fmt.Errorf("user %s has no id", userID)
 		}
 
-		result, err = client.Users().ByUserId(*newUser.GetId()).TransitiveMemberOf().Get(ctx, nil)
+		result, err = client.Users().ByUserId(*newUser.GetId()).TransitiveMemberOf().Get(ctx, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch user infos for user %s: %w", userID, err)
 		}
-
 	}
 
-	for _, item := range result.GetValue() {
+	pageIterator, err := msgraphcore.NewPageIterator[models.DirectoryObjectable](
+		result, client.GetAdapter(), models.CreateDirectoryObjectCollectionResponseFromDiscriminatorValue,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create membership page iterator for user %s: %w", userID, err)
+	}
+
+	groupInfos := make(state.GroupInfoList, 0, graphPageSize)
+	if err := pageIterator.Iterate(ctx, func(item models.DirectoryObjectable) bool {
+		// TransitiveMemberOf also returns directory roles and administrative units; keep only groups.
 		if group, ok := item.(*models.Group); ok {
-			groupInfo := convertToGroupInfo(group)
-			if groupInfo != nil {
+			if groupInfo := convertToGroupInfo(group); groupInfo != nil {
 				groupInfos = append(groupInfos, *groupInfo)
 			}
 		}
+		if len(groupInfos) >= maxGroups {
+			slog.Warn("Reached the maximum number of Entra groups that can be listed for a user; some groups were not loaded", "userID", userID, "groupLimit", maxGroups)
+			return false
+		}
+		return true
+	}); err != nil {
+		return nil, fmt.Errorf("failed to page through memberships for user %s: %w", userID, err)
 	}
 
 	return groupInfos, nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,11 +16,11 @@ import (
 	oauth2proxy "github.com/oauth2-proxy/oauth2-proxy/v7"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/validation"
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/enterprise-providers/entra-auth-provider/pkg/client"
 	"github.com/obot-platform/enterprise-providers/entra-auth-provider/pkg/profile"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/env"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
-	"github.com/sahilm/fuzzy"
 )
 
 type Options struct {
@@ -38,6 +39,7 @@ type Options struct {
 
 type server struct {
 	graphClient *msgraphsdkgo.GraphServiceClient
+	groupCache  *authcommon.GroupCache
 }
 
 func main() {
@@ -120,6 +122,7 @@ func main() {
 	// Initialize application token manager for Microsoft Graph API calls
 	srv := &server{
 		graphClient: graphClient,
+		groupCache:  authcommon.NewGroupCache(authcommon.GroupCacheTTL),
 	}
 
 	port := os.Getenv("PORT")
@@ -152,38 +155,22 @@ func main() {
 // listGroups returns all groups in the tenant with optional fuzzy name filtering.
 // Uses application permissions. Body is ignored (no user ID needed for listing all groups).
 func (s *server) listGroups(w http.ResponseWriter, r *http.Request) {
-	// Note: Request body is ignored for this endpoint since we're listing all groups,
-	// not user-specific groups. The body may be present for consistency with other endpoints.
-
-	// Fetch all groups using application permissions
-	groups, err := profile.FetchGroupInfos(r.Context(), s.graphClient)
+	// GET /obot-list-auth-groups?name=&limit=&offset=
+	// Returns the provider's groups, optionally fuzzy-filtered by name. Supplying a limit selects
+	// a paginated envelope; omitting it returns a bare array for backward compatibility.
+	groups, err := s.groupCache.Get(r.Context(), func(ctx context.Context) (state.GroupInfoList, error) {
+		return profile.FetchGroupInfos(ctx, s.graphClient)
+	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to fetch groups: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	if groups == nil {
-		groups = state.GroupInfoList{}
-	}
+	query := r.URL.Query()
+	limit, offset, paginated := authcommon.ParseGroupPageParams(query)
+	payload := authcommon.BuildGroupsResponse(groups, query.Get("name"), limit, offset, paginated)
 
-	// Apply fuzzy name filtering if requested via query parameter
-	nameFilter := r.URL.Query().Get("name")
-	if nameFilter != "" && len(groups) > 0 {
-		groupNames := make([]string, len(groups))
-		for i, group := range groups {
-			groupNames[i] = group.Name
-		}
-
-		matches := fuzzy.Find(nameFilter, groupNames)
-
-		var filteredGroups state.GroupInfoList
-		for _, match := range matches {
-			filteredGroups = append(filteredGroups, groups[match.Index])
-		}
-		groups = filteredGroups
-	}
-
-	if err := json.NewEncoder(w).Encode(groups); err != nil {
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		http.Error(w, fmt.Sprintf("failed to encode groups: %v", err), http.StatusInternalServerError)
 		return
 	}

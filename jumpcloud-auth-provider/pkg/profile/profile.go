@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/obot-platform/enterprise-providers/jumpcloud-auth-provider/pkg/client"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
+)
+
+const (
+	bulkGroupLookupThreshold = 50
+	maxGroups                = 100000
 )
 
 // UserInfo represents basic user profile information.
@@ -294,12 +300,20 @@ func fetchAllGroups(ctx context.Context, apiClient *client.APIClient) ([]userGro
 		if len(groups) < limit {
 			break
 		}
+		if len(allGroups) >= maxGroups {
+			slog.Warn("Reached the maximum number of JumpCloud groups that can be listed; some groups were not loaded", "groupLimit", maxGroups)
+			break
+		}
 	}
 
 	return allGroups, nil
 }
 
 func fetchGroupsByIDs(ctx context.Context, apiClient *client.APIClient, groupIDs []string) ([]userGroup, error) {
+	if len(groupIDs) > bulkGroupLookupThreshold {
+		return fetchGroupsByIDsInBulk(ctx, apiClient, groupIDs)
+	}
+
 	groups := make([]userGroup, 0, len(groupIDs))
 
 	for _, groupID := range groupIDs {
@@ -308,27 +322,7 @@ func fetchGroupsByIDs(ctx context.Context, apiClient *client.APIClient, groupIDs
 			return nil, err
 		}
 		if shouldFallback {
-			allGroups, err := fetchAllGroups(ctx, apiClient)
-			if err != nil {
-				return nil, err
-			}
-
-			memberOfSet := make(map[string]struct{}, len(groupIDs))
-			for _, id := range groupIDs {
-				memberOfSet[id] = struct{}{}
-			}
-
-			filteredGroups := make([]userGroup, 0, len(groupIDs))
-			for _, candidate := range allGroups {
-				if candidate.ID == "" {
-					continue
-				}
-				if _, ok := memberOfSet[candidate.ID]; !ok {
-					continue
-				}
-				filteredGroups = append(filteredGroups, candidate)
-			}
-			return filteredGroups, nil
+			return fetchGroupsByIDsInBulk(ctx, apiClient, groupIDs)
 		}
 		if group == nil {
 			// Missing groups are ignored so transient membership/listing races do not fail login.
@@ -339,6 +333,32 @@ func fetchGroupsByIDs(ctx context.Context, apiClient *client.APIClient, groupIDs
 	}
 
 	return groups, nil
+}
+
+// fetchGroupsByIDsInBulk lists every group once and keeps those the user is a member of.
+func fetchGroupsByIDsInBulk(ctx context.Context, apiClient *client.APIClient, groupIDs []string) ([]userGroup, error) {
+	allGroups, err := fetchAllGroups(ctx, apiClient)
+	if err != nil {
+		return nil, err
+	}
+
+	memberOfSet := make(map[string]struct{}, len(groupIDs))
+	for _, id := range groupIDs {
+		memberOfSet[id] = struct{}{}
+	}
+
+	filteredGroups := make([]userGroup, 0, len(groupIDs))
+	for _, candidate := range allGroups {
+		if candidate.ID == "" {
+			continue
+		}
+		if _, ok := memberOfSet[candidate.ID]; !ok {
+			continue
+		}
+		filteredGroups = append(filteredGroups, candidate)
+	}
+
+	return filteredGroups, nil
 }
 
 func fetchGroupByID(ctx context.Context, apiClient *client.APIClient, groupID string) (*userGroup, bool, error) {

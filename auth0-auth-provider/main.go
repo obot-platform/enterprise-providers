@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,9 +18,9 @@ import (
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/validation"
 	"github.com/obot-platform/enterprise-providers/auth0-auth-provider/pkg/client"
 	"github.com/obot-platform/enterprise-providers/auth0-auth-provider/pkg/profile"
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/env"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
-	"github.com/sahilm/fuzzy"
 )
 
 type Options struct {
@@ -47,6 +48,7 @@ type Options struct {
 
 type server struct {
 	mgmtClient *client.ManagementClient
+	groupCache *authcommon.GroupCache
 	domain     string
 }
 
@@ -139,6 +141,7 @@ func main() {
 	srv := &server{
 		mgmtClient: mgmtClient,
 		domain:     opts.Domain,
+		groupCache: authcommon.NewGroupCache(authcommon.GroupCacheTTL),
 	}
 
 	port := os.Getenv("PORT")
@@ -172,34 +175,22 @@ func main() {
 // listGroups returns all roles in the Auth0 tenant with optional fuzzy name filtering.
 // Uses Management API client credentials. Body is ignored.
 func (s *server) listGroups(w http.ResponseWriter, r *http.Request) {
-	groups, err := profile.FetchAllGroupInfos(r.Context(), s.mgmtClient)
+	// GET /obot-list-auth-groups?name=&limit=&offset=
+	// Returns the provider's groups, optionally fuzzy-filtered by name. Supplying a limit selects
+	// a paginated envelope; omitting it returns a bare array for backward compatibility.
+	groups, err := s.groupCache.Get(r.Context(), func(ctx context.Context) (state.GroupInfoList, error) {
+		return profile.FetchAllGroupInfos(ctx, s.mgmtClient)
+	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to fetch groups: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	if groups == nil {
-		groups = state.GroupInfoList{}
-	}
+	query := r.URL.Query()
+	limit, offset, paginated := authcommon.ParseGroupPageParams(query)
+	payload := authcommon.BuildGroupsResponse(groups, query.Get("name"), limit, offset, paginated)
 
-	// Apply fuzzy name filtering if requested via query parameter
-	nameFilter := r.URL.Query().Get("name")
-	if nameFilter != "" && len(groups) > 0 {
-		groupNames := make([]string, len(groups))
-		for i, group := range groups {
-			groupNames[i] = group.Name
-		}
-
-		matches := fuzzy.Find(nameFilter, groupNames)
-
-		var filteredGroups state.GroupInfoList
-		for _, match := range matches {
-			filteredGroups = append(filteredGroups, groups[match.Index])
-		}
-		groups = filteredGroups
-	}
-
-	if err := json.NewEncoder(w).Encode(groups); err != nil {
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		http.Error(w, fmt.Sprintf("failed to encode groups: %v", err), http.StatusInternalServerError)
 		return
 	}

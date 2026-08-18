@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 	"github.com/okta/okta-sdk-golang/v5/okta"
+)
+
+const (
+	oktaPageSize = 200
+	maxGroups    = 100000
 )
 
 // UserInfo represents basic user profile information.
@@ -25,23 +31,26 @@ type UserInfo struct {
 // Requires okta.users.read or okta.groups.read scope in the service account token.
 func FetchUserGroupInfos(ctx context.Context, client *okta.APIClient, userID string) (state.GroupInfoList, error) {
 	// Query user-specific groups endpoint (accepts user ID or login/email)
-	groups, _, err := client.UserAPI.ListUserGroups(ctx, userID).Execute()
+	groups, resp, err := client.UserAPI.ListUserGroups(ctx, userID).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch group memberships for user %s: %w", userID, err)
 	}
 
-	return convertOktaGroupsToGroupInfos(groups), nil
+	allGroups, err := collectRemainingPages(groups, resp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch group memberships for user %s: %w", userID, err)
+	}
+
+	return convertOktaGroupsToGroupInfos(allGroups), nil
 }
 
 // FetchAllGroupInfos fetches all groups in the Okta organization.
 // Uses the Okta Management API endpoint: GET /api/v1/groups
 // This is used for admin selection of groups.
 func FetchAllGroupInfos(ctx context.Context, client *okta.APIClient) (state.GroupInfoList, error) {
-	// List all groups with pagination limit
-	// Using 200 as recommended by Okta best practices
-	groups, _, err := client.GroupAPI.ListGroups(ctx).Limit(200).Execute()
+	groups, err := fetchAllGroups(ctx, client)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch all groups: %w", err)
+		return nil, err
 	}
 
 	return convertOktaGroupsToGroupInfos(groups), nil
@@ -170,17 +179,33 @@ func BuildGroupMigrationMapping(ctx context.Context, client *okta.APIClient) ([]
 
 // fetchAllGroups fetches all groups from Okta, paginating through all pages.
 func fetchAllGroups(ctx context.Context, client *okta.APIClient) ([]okta.Group, error) {
-	groups, resp, err := client.GroupAPI.ListGroups(ctx).Limit(200).Execute()
+	groups, resp, err := client.GroupAPI.ListGroups(ctx).Limit(oktaPageSize).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch groups: %w", err)
 	}
 
-	allGroups := groups
-	for resp.HasNextPage() {
-		var nextGroups []okta.Group
-		resp, err = resp.Next(&nextGroups)
-		if err != nil {
+	return collectRemainingPages(groups, resp)
+}
+
+// collectRemainingPages walks the Link-header cursor from an Okta list call and appends every
+// remaining page to the first one. Okta returns a single page per request.
+func collectRemainingPages(first []okta.Group, resp *okta.APIResponse) ([]okta.Group, error) {
+	allGroups := first
+	for resp != nil && resp.HasNextPage() {
+		if len(allGroups) >= maxGroups {
+			slog.Warn("Reached the maximum number of Okta groups that can be listed; some groups were not loaded", "groupLimit", maxGroups)
+			break
+		}
+
+		var (
+			nextGroups []okta.Group
+			err        error
+		)
+		if resp, err = resp.Next(&nextGroups); err != nil {
 			return nil, fmt.Errorf("failed to fetch next page of groups: %w", err)
+		}
+		if len(nextGroups) == 0 {
+			break
 		}
 		allGroups = append(allGroups, nextGroups...)
 	}

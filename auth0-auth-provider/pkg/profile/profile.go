@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/obot-platform/enterprise-providers/auth0-auth-provider/pkg/client"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
+
+const maxGroups = 100000
 
 // UserInfo represents basic user profile information.
 type UserInfo struct {
@@ -108,7 +111,11 @@ func FetchAllGroupInfos(ctx context.Context, mgmtClient *client.ManagementClient
 
 		allRoles = append(allRoles, result.Roles...)
 
-		if len(allRoles) >= result.Total {
+		if len(result.Roles) == 0 || len(allRoles) >= result.Total {
+			break
+		}
+		if len(allRoles) >= maxGroups {
+			slog.Warn("Reached the maximum number of Auth0 roles that can be listed; some roles were not loaded", "roleLimit", maxGroups)
 			break
 		}
 		page++
@@ -152,7 +159,11 @@ func FetchUserGroupInfos(ctx context.Context, mgmtClient *client.ManagementClien
 
 		allRoles = append(allRoles, result.Roles...)
 
-		if len(allRoles) >= result.Total {
+		if len(result.Roles) == 0 || len(allRoles) >= result.Total {
+			break
+		}
+		if len(allRoles) >= maxGroups {
+			slog.Warn("Reached the maximum number of Auth0 roles that can be listed; some roles were not loaded", "roleLimit", maxGroups)
 			break
 		}
 		page++
