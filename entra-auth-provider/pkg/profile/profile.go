@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -13,6 +14,7 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/groups"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
 
@@ -33,43 +35,104 @@ type UserInfo struct {
 // Cache keys: "user:<userID>" or "group:<groupID>"
 var photoCache = expirable.NewLRU[string, string](1000, nil, time.Hour)
 
-// FetchGroupInfos retrieves every group in the tenant, following Graph's @odata.nextLink through
-// all pages.
-func FetchGroupInfos(ctx context.Context, client *msgraphsdkgo.GraphServiceClient) (state.GroupInfoList, error) {
-	top := int32(graphPageSize)
-	result, err := client.Groups().Get(ctx, &groups.GroupsRequestBuilderGetRequestConfiguration{
-		QueryParameters: &groups.GroupsRequestBuilderGetQueryParameters{
-			Top: &top,
-			// Only these two fields are used; the default group object is far larger.
-			Select: []string{"id", "displayName"},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch groups: %w", err)
+const graphGroupsURLPrefix = "https://graph.microsoft.com/v1.0/groups?"
+
+// FetchGroupPage retrieves one page of the tenant's groups, following Graph's @odata.nextLink as
+// the continuation token.
+func FetchGroupPage(ctx context.Context, client *msgraphsdkgo.GraphServiceClient, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	if req.Cursor != "" {
+		result, err := client.Groups().WithUrl(expandNextLink(req.Cursor)).Get(ctx, nil)
+		if err != nil {
+			// A next link that Graph no longer accepts has usually expired. Report it as a bad
+			// cursor so the caller restarts from the first page instead of treating it as an outage.
+			return authcommon.PageResult{}, fmt.Errorf("%w: failed to follow group page link: %v", authcommon.ErrInvalidCursor, err)
+		}
+
+		return groupPageFrom(result), nil
 	}
 
-	pageIterator, err := msgraphcore.NewPageIterator[*models.Group](
-		result, client.GetAdapter(), models.CreateGroupCollectionResponseFromDiscriminatorValue,
-	)
+	result, err := client.Groups().Get(ctx, groupsRequestConfiguration(req, true))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create group page iterator: %w", err)
+		// $orderby alongside $filter is accepted for a property Graph can sort and filter on, but
+		// the combination is worth not betting the listing on. Retry unordered before giving up.
+		if req.NameFilter == "" {
+			return authcommon.PageResult{}, fmt.Errorf("failed to fetch groups: %w", err)
+		}
+
+		slog.Debug("group listing with $orderby was rejected, retrying unordered", "error", err)
+		if result, err = client.Groups().Get(ctx, groupsRequestConfiguration(req, false)); err != nil {
+			return authcommon.PageResult{}, fmt.Errorf("failed to fetch groups: %w", err)
+		}
 	}
 
-	groupInfos := make(state.GroupInfoList, 0, graphPageSize)
-	if err := pageIterator.Iterate(ctx, func(group *models.Group) bool {
+	return groupPageFrom(result), nil
+}
+
+// groupsRequestConfiguration builds the query for the first page of a listing.
+func groupsRequestConfiguration(req authcommon.PageRequest, ordered bool) *groups.GroupsRequestBuilderGetRequestConfiguration {
+	top := int32(req.Limit)
+	params := &groups.GroupsRequestBuilderGetQueryParameters{
+		Top: &top,
+		// Only these two fields are used; the default group object is far larger.
+		Select: []string{"id", "displayName"},
+	}
+
+	if ordered {
+		params.Orderby = []string{"displayName"}
+	}
+
+	if req.NameFilter != "" {
+		// Graph offers a prefix match here. A contains-style match would mean $search, which needs
+		// the advanced query header; see the note on FetchGroupPage.
+		filter := fmt.Sprintf("startswith(displayName,'%s')", escapeODataString(req.NameFilter))
+		params.Filter = &filter
+	}
+
+	return &groups.GroupsRequestBuilderGetRequestConfiguration{QueryParameters: params}
+}
+
+// groupPageFrom converts a Graph collection response into one page of groups.
+func groupPageFrom(result models.GroupCollectionResponseable) authcommon.PageResult {
+	if result == nil {
+		return authcommon.PageResult{Items: state.GroupInfoList{}}
+	}
+
+	values := result.GetValue()
+	groupInfos := make(state.GroupInfoList, 0, len(values))
+	for _, group := range values {
 		if groupInfo := convertToGroupInfo(group); groupInfo != nil {
 			groupInfos = append(groupInfos, *groupInfo)
 		}
-		if len(groupInfos) >= maxGroups {
-			slog.Warn("Reached the maximum number of Entra groups that can be listed; some groups were not loaded", "groupLimit", maxGroups)
-			return false
-		}
-		return true
-	}); err != nil {
-		return nil, fmt.Errorf("failed to page through groups: %w", err)
 	}
 
-	return groupInfos, nil
+	var nextCursor string
+	if link := result.GetOdataNextLink(); link != nil {
+		nextCursor = compactNextLink(*link)
+	}
+
+	return authcommon.PageResult{Items: groupInfos, NextCursor: nextCursor}
+}
+
+// escapeODataString escapes a value for use inside an OData string literal, where a single quote
+// is written twice.
+func escapeODataString(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
+}
+
+// compactNextLink strips the constant part of a Graph next link. Links from a national cloud have
+// a different host, so those are carried whole.
+func compactNextLink(link string) string {
+	return strings.TrimPrefix(link, graphGroupsURLPrefix)
+}
+
+// expandNextLink restores a cursor produced by compactNextLink to a full URL. A cursor that is
+// already absolute is one compactNextLink did not recognize, so it is used as it is.
+func expandNextLink(cursor string) string {
+	if strings.Contains(cursor, "://") {
+		return cursor
+	}
+
+	return graphGroupsURLPrefix + cursor
 }
 
 // FetchUserGroupInfos retrieves all groups the specified user belongs to.
@@ -152,7 +215,7 @@ func lookupGuestByEmail(ctx context.Context, client *msgraphsdkgo.GraphServiceCl
 }
 
 // convertToGroupInfo converts a Microsoft Graph Group model to our GroupInfo structure.
-func convertToGroupInfo(group *models.Group) *state.GroupInfo {
+func convertToGroupInfo(group models.Groupable) *state.GroupInfo {
 	id := getValue(group.GetId())
 	if id == "" {
 		return nil // Skip groups without IDs

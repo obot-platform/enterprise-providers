@@ -12,6 +12,8 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/microsoft/kiota-abstractions-go v1.9.2
+	github.com/microsoft/kiota-http-go v1.5.5
 	github.com/microsoftgraph/msgraph-sdk-go v1.79.0
 	github.com/microsoftgraph/msgraph-sdk-go-core v1.3.2
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
@@ -54,9 +56,7 @@ require (
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/justinas/alice v1.2.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
-	github.com/microsoft/kiota-abstractions-go v1.9.2 // indirect
 	github.com/microsoft/kiota-authentication-azure-go v1.3.0 // indirect
-	github.com/microsoft/kiota-http-go v1.5.5 // indirect
 	github.com/microsoft/kiota-serialization-form-go v1.1.2 // indirect
 	github.com/microsoft/kiota-serialization-json-go v1.1.2 // indirect
 	github.com/microsoft/kiota-serialization-multipart-go v1.1.2 // indirect
@@ -72,7 +72,6 @@ require (
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/redis/go-redis/v9 v9.18.0 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
-	github.com/sahilm/fuzzy v0.1.1 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect

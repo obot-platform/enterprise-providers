@@ -7,9 +7,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 	"github.com/okta/okta-sdk-golang/v5/okta"
 )
@@ -44,16 +46,57 @@ func FetchUserGroupInfos(ctx context.Context, client *okta.APIClient, userID str
 	return convertOktaGroupsToGroupInfos(allGroups), nil
 }
 
-// FetchAllGroupInfos fetches all groups in the Okta organization.
+// FetchGroupPage fetches one page of groups from the Okta organization.
 // Uses the Okta Management API endpoint: GET /api/v1/groups
-// This is used for admin selection of groups.
-func FetchAllGroupInfos(ctx context.Context, client *okta.APIClient) (state.GroupInfoList, error) {
-	groups, err := fetchAllGroups(ctx, client)
-	if err != nil {
-		return nil, err
+//
+// The continuation token is Okta's "after" cursor, lifted out of the Link header of the previous
+// response.
+//
+// Ordering is Okta's own, not alphabetical. Okta only honors sortBy alongside the "search"
+// parameter, and search is served from an eventually consistent index whose cursor paging can skip
+// or repeat rows, so it is not safe to page over. Sorting each page locally is worse than not
+// sorting at all: it would make every page individually alphabetical while the sequence as a whole
+// stayed arbitrary, which reads as a bug. The name filter is what users navigate with instead.
+func FetchGroupPage(ctx context.Context, client *okta.APIClient, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	r := client.GroupAPI.ListGroups(ctx).Limit(int32(req.Limit))
+	if req.NameFilter != "" {
+		// Okta matches q as a case-insensitive starts-with on the group name. It is the
+		// pagination-safe filter; see the note on search above.
+		r = r.Q(req.NameFilter)
+	}
+	if req.Cursor != "" {
+		r = r.After(req.Cursor)
 	}
 
-	return convertOktaGroupsToGroupInfos(groups), nil
+	groups, resp, err := r.Execute()
+	if err != nil {
+		return authcommon.PageResult{}, fmt.Errorf("failed to fetch groups: %w", err)
+	}
+
+	nextCursor, err := nextGroupCursor(resp)
+	if err != nil {
+		return authcommon.PageResult{}, err
+	}
+
+	return authcommon.PageResult{
+		Items:      convertOktaGroupsToGroupInfos(groups),
+		NextCursor: nextCursor,
+	}, nil
+}
+
+// nextGroupCursor extracts Okta's "after" cursor from the next-page link of a list response.
+// Okta hands back a full URL; only the after value is worth carrying, and it is short.
+func nextGroupCursor(resp *okta.APIResponse) (string, error) {
+	if resp == nil || !resp.HasNextPage() {
+		return "", nil
+	}
+
+	next, err := url.Parse(resp.NextPage())
+	if err != nil {
+		return "", fmt.Errorf("failed to parse Okta next page link: %w", err)
+	}
+
+	return next.Query().Get("after"), nil
 }
 
 // convertOktaGroupsToGroupInfos converts a slice of Okta groups to GroupInfo structs.

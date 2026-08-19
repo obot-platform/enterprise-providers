@@ -16,6 +16,7 @@ import (
 // ManagementClient wraps Auth0 Management API calls with automatic token management.
 type ManagementClient struct {
 	domain       string
+	baseURL      string
 	clientID     string
 	clientSecret string
 
@@ -27,8 +28,22 @@ type ManagementClient struct {
 // NewManagementClient creates a client for the Auth0 Management API.
 // Uses client credentials grant to obtain and refresh tokens automatically.
 func NewManagementClient(domain, clientID, clientSecret string) *ManagementClient {
+	domain = strings.TrimSuffix(domain, "/")
+
 	return &ManagementClient{
-		domain:       strings.TrimSuffix(domain, "/"),
+		domain:       domain,
+		baseURL:      "https://" + domain,
+		clientID:     clientID,
+		clientSecret: clientSecret,
+	}
+}
+
+// NewManagementClientWithBaseURL creates a client against an explicit base URL rather than deriving
+// one from the tenant domain. Tests use it to point the client at a stub Management API.
+func NewManagementClientWithBaseURL(baseURL, clientID, clientSecret string) *ManagementClient {
+	return &ManagementClient{
+		domain:       baseURL,
+		baseURL:      strings.TrimSuffix(baseURL, "/"),
 		clientID:     clientID,
 		clientSecret: clientSecret,
 	}
@@ -56,10 +71,10 @@ func (c *ManagementClient) getToken(ctx context.Context) (string, error) {
 		"grant_type":    {"client_credentials"},
 		"client_id":     {c.clientID},
 		"client_secret": {c.clientSecret},
-		"audience":      {fmt.Sprintf("https://%s/api/v2/", c.domain)},
+		"audience":      {c.baseURL + "/api/v2/"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://%s/oauth/token", c.domain), strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/oauth/token", strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("failed to create token request: %w", err)
 	}
@@ -108,7 +123,7 @@ func (c *ManagementClient) DoRequest(ctx context.Context, method, path string, b
 		return nil, fmt.Errorf("failed to get management token: %w", err)
 	}
 
-	reqURL := fmt.Sprintf("https://%s%s", c.domain, path)
+	reqURL := c.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)

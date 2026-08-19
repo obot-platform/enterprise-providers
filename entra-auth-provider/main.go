@@ -39,7 +39,6 @@ type Options struct {
 
 type server struct {
 	graphClient *msgraphsdkgo.GraphServiceClient
-	groupCache  *authcommon.GroupCache
 }
 
 func main() {
@@ -122,7 +121,6 @@ func main() {
 	// Initialize application token manager for Microsoft Graph API calls
 	srv := &server{
 		graphClient: graphClient,
-		groupCache:  authcommon.NewGroupCache(authcommon.GroupCacheTTL),
 	}
 
 	port := os.Getenv("PORT")
@@ -136,7 +134,7 @@ func main() {
 	})
 	mux.HandleFunc("/obot-get-state", state.ObotGetState(oauthProxy))
 	mux.HandleFunc("/obot-get-user-info", getUserInfo)
-	mux.HandleFunc("/obot-list-auth-groups", srv.listGroups)
+	mux.HandleFunc("/obot-list-auth-groups", authcommon.ListGroupsHandler("entra", srv.fetchGroupPage))
 	mux.HandleFunc("/obot-list-user-auth-groups", srv.listUserGroups)
 	mux.HandleFunc("/", oauthProxy.ServeHTTP)
 
@@ -152,28 +150,10 @@ func main() {
 	}
 }
 
-// listGroups returns all groups in the tenant with optional fuzzy name filtering.
-// Uses application permissions. Body is ignored (no user ID needed for listing all groups).
-func (s *server) listGroups(w http.ResponseWriter, r *http.Request) {
-	// GET /obot-list-auth-groups?name=&limit=&offset=
-	// Returns the provider's groups, optionally fuzzy-filtered by name. Supplying a limit selects
-	// a paginated envelope; omitting it returns a bare array for backward compatibility.
-	groups, err := s.groupCache.Get(r.Context(), func(ctx context.Context) (state.GroupInfoList, error) {
-		return profile.FetchGroupInfos(ctx, s.graphClient)
-	})
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to fetch groups: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	query := r.URL.Query()
-	limit, offset, paginated := authcommon.ParseGroupPageParams(query)
-	payload := authcommon.BuildGroupsResponse(groups, query.Get("name"), limit, offset, paginated)
-
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		http.Error(w, fmt.Sprintf("failed to encode groups: %v", err), http.StatusInternalServerError)
-		return
-	}
+// fetchGroupPage fetches one page of the tenant's groups. Paging, filtering and cursor handling
+// all live in authcommon.ListGroupsHandler, which serves GET /obot-list-auth-groups.
+func (s *server) fetchGroupPage(ctx context.Context, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	return profile.FetchGroupPage(ctx, s.graphClient, req)
 }
 
 // listUserGroups returns all groups the specified user belongs to.

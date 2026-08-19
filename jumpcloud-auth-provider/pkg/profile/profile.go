@@ -8,8 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/enterprise-providers/jumpcloud-auth-provider/pkg/client"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
@@ -97,13 +100,77 @@ func GetUserInfo(ctx context.Context, accessToken, issuerURL string, apiClient *
 	}, nil
 }
 
-// FetchAllGroupInfos fetches all JumpCloud user groups.
-func FetchAllGroupInfos(ctx context.Context, apiClient *client.APIClient) (state.GroupInfoList, error) {
-	groups, err := fetchAllGroups(ctx, apiClient)
-	if err != nil {
-		return nil, err
+// FetchGroupPage fetches one page of JumpCloud user groups.
+//
+// The continuation token is the skip offset: the v2 API pages with limit/skip and has no opaque
+// cursor of its own. Results are sorted by name server-side, which makes the offset stable enough
+// to page over.
+func FetchGroupPage(ctx context.Context, apiClient *client.APIClient, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	skip := 0
+	if req.Cursor != "" {
+		var err error
+		if skip, err = strconv.Atoi(req.Cursor); err != nil || skip < 0 {
+			return authcommon.PageResult{}, fmt.Errorf("%w: %q is not a skip offset", authcommon.ErrInvalidCursor, req.Cursor)
+		}
 	}
-	return convertGroupsToGroupInfos(groups), nil
+
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(req.Limit))
+	query.Set("skip", strconv.Itoa(skip))
+	query.Set("sort", "name")
+	if req.NameFilter != "" {
+		// The filter value is interpolated into a server-side regex, so it must be quoted. (?i)
+		// makes the match case-insensitive and leaving it unanchored makes it a substring match,
+		// which matches how the other providers and the Obot-side cache behave.
+		query.Set("filter", "name:$regex:(?i)"+regexp.QuoteMeta(req.NameFilter))
+	}
+
+	resp, err := apiClient.DoRequest(ctx, http.MethodGet, "/api/v2/usergroups", query, nil)
+	if err != nil {
+		return authcommon.PageResult{}, fmt.Errorf("failed to fetch JumpCloud groups: %w", err)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return authcommon.PageResult{}, fmt.Errorf("failed to read JumpCloud groups response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return authcommon.PageResult{}, fmt.Errorf("usergroups endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var groups []userGroup
+	if err := json.Unmarshal(body, &groups); err != nil {
+		return authcommon.PageResult{}, fmt.Errorf("failed to decode JumpCloud groups response: %w", err)
+	}
+
+	return authcommon.PageResult{
+		Items:      convertGroupsToGroupInfos(groups),
+		NextCursor: nextGroupCursor(skip, len(groups), req.Limit, resp.Header.Get("X-Total-Count")),
+	}, nil
+}
+
+// nextGroupCursor decides whether another page exists. JumpCloud reports the unpaged size in
+// X-Total-Count, which gives an exact answer; without it, a full page is taken to mean there may
+// be more, which costs at most one extra empty request at the end.
+func nextGroupCursor(skip, fetched, limit int, totalHeader string) string {
+	if fetched == 0 {
+		return ""
+	}
+
+	if total, err := strconv.Atoi(totalHeader); err == nil {
+		if skip+fetched >= total {
+			return ""
+		}
+		return strconv.Itoa(skip + fetched)
+	}
+
+	if fetched < limit {
+		return ""
+	}
+
+	return strconv.Itoa(skip + fetched)
 }
 
 // FetchUserGroupInfos fetches all JumpCloud user groups for a specific user.

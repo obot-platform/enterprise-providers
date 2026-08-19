@@ -44,9 +44,8 @@ type Options struct {
 }
 
 type server struct {
-	apiClient  *client.APIClient
-	groupCache *authcommon.GroupCache
-	issuerURL  string
+	apiClient *client.APIClient
+	issuerURL string
 }
 
 func main() {
@@ -146,8 +145,7 @@ func main() {
 			ClientSecret: opts.ServiceAccountClientSecret,
 			TokenURL:     opts.ServiceAccountTokenURL,
 		}),
-		issuerURL:  opts.IssuerURL,
-		groupCache: authcommon.NewGroupCache(authcommon.GroupCacheTTL),
+		issuerURL: opts.IssuerURL,
 	}
 
 	port := os.Getenv("PORT")
@@ -161,7 +159,7 @@ func main() {
 	})
 	mux.HandleFunc("/obot-get-state", state.ObotGetState(oauthProxy))
 	mux.HandleFunc("/obot-get-user-info", srv.getUserInfo)
-	mux.HandleFunc("/obot-list-auth-groups", srv.listGroups)
+	mux.HandleFunc("/obot-list-auth-groups", authcommon.ListGroupsHandler("jumpcloud", srv.fetchGroupPage))
 	mux.HandleFunc("/obot-list-user-auth-groups", srv.listUserGroups)
 	mux.HandleFunc("/", oauthProxy.ServeHTTP)
 
@@ -177,26 +175,11 @@ func main() {
 	}
 }
 
-func (s *server) listGroups(w http.ResponseWriter, r *http.Request) {
-	// GET /obot-list-auth-groups?name=&limit=&offset=
-	// Returns the provider's groups, optionally fuzzy-filtered by name. Supplying a limit selects
-	// a paginated envelope; omitting it returns a bare array for backward compatibility.
-	groups, err := s.groupCache.Get(r.Context(), func(ctx context.Context) (state.GroupInfoList, error) {
-		return profile.FetchAllGroupInfos(ctx, s.apiClient)
-	})
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to fetch groups: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	query := r.URL.Query()
-	limit, offset, paginated := authcommon.ParseGroupPageParams(query)
-	payload := authcommon.BuildGroupsResponse(groups, query.Get("name"), limit, offset, paginated)
-
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		http.Error(w, fmt.Sprintf("failed to encode groups: %v", err), http.StatusInternalServerError)
-		return
-	}
+// fetchGroupPage fetches one page of the JumpCloud organization's user groups. Paging, filtering
+// and cursor handling all live in authcommon.ListGroupsHandler, which serves
+// GET /obot-list-auth-groups.
+func (s *server) fetchGroupPage(ctx context.Context, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	return profile.FetchGroupPage(ctx, s.apiClient, req)
 }
 
 func (s *server) listUserGroups(w http.ResponseWriter, r *http.Request) {
