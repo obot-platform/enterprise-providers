@@ -2,11 +2,10 @@ module github.com/obot-platform/enterprise-providers/entra-auth-provider
 
 go 1.26.4
 
-require github.com/obot-platform/enterprise-providers/authcommon v0.0.0
-
-replace github.com/obot-platform/enterprise-providers/authcommon => ../authcommon
-
-replace github.com/oauth2-proxy/oauth2-proxy/v7 => github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20260718004156-5704f042a6ff
+replace (
+	github.com/oauth2-proxy/oauth2-proxy/v7 => github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20260718004156-5704f042a6ff
+	github.com/obot-platform/enterprise-providers/authcommon => ../authcommon
+)
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
@@ -17,6 +16,7 @@ require (
 	github.com/microsoftgraph/msgraph-sdk-go v1.79.0
 	github.com/microsoftgraph/msgraph-sdk-go-core v1.3.2
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
+	github.com/obot-platform/enterprise-providers/authcommon v0.0.0
 	github.com/obot-platform/providers/auth-providers-common v0.0.0-20260717172559-9ab827189ee6
 )
 

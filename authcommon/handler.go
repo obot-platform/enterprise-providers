@@ -42,7 +42,7 @@ func ListGroupsHandler(providerKind string, fetch FetchGroupPageFunc) http.Handl
 			return
 		}
 
-		nextCursor, err := EncodeCursor(providerKind, req.NameFilter, result.NextCursor)
+		nextCursor, err := EncodeCursor(providerKind, req.NameFilter, req.Limit, result.NextCursor)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to encode cursor: %v", err), http.StatusInternalServerError)
 			return

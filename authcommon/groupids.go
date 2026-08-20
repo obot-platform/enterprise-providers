@@ -75,8 +75,13 @@ func ResolveGroupsByLookup(ctx context.Context, ids []string, lookup func(contex
 	)
 
 	for _, id := range ids {
+		if ctx.Err() != nil {
+			break
+		}
+
+		sem <- struct{}{}
+
 		wg.Go(func() {
-			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			group, err := lookup(ctx, id)
@@ -99,6 +104,10 @@ func ResolveGroupsByLookup(ctx context.Context, ids []string, lookup func(contex
 	}
 
 	wg.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("failed to resolve groups: %w", err)
+	}
 
 	if failures == len(ids) {
 		return nil, fmt.Errorf("failed to resolve any of the %d requested groups: %w", len(ids), firstErr)

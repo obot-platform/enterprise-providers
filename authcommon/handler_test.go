@@ -244,7 +244,7 @@ func TestListGroupsHandlerRejectsForeignCursor(t *testing.T) {
 	defer srv.Close()
 
 	// Minted for a different provider.
-	foreign, err := EncodeCursor("okta", "", "10")
+	foreign, err := EncodeCursor("okta", "", 10, "10")
 	if err != nil {
 		t.Fatalf("EncodeCursor() error = %v", err)
 	}
@@ -268,7 +268,7 @@ func TestListGroupsHandlerRejectsCursorAfterFilterChange(t *testing.T) {
 	srv := httptest.NewServer(ListGroupsHandler("auth0", pagedFetch(testGroups(25), &calls)))
 	defer srv.Close()
 
-	cursor, err := EncodeCursor("auth0", "eng", "10")
+	cursor, err := EncodeCursor("auth0", "eng", 10, "10")
 	if err != nil {
 		t.Fatalf("EncodeCursor() error = %v", err)
 	}
@@ -281,6 +281,78 @@ func TestListGroupsHandlerRejectsCursorAfterFilterChange(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// A cursor means "the next page at the size it was minted for". Auth0's native token is a page
+// number, so replaying a cursor at a different page size would skip or repeat rows.
+func TestListGroupsHandlerRejectsCursorAfterLimitChange(t *testing.T) {
+	var calls []PageRequest
+	srv := httptest.NewServer(ListGroupsHandler("auth0", pagedFetch(testGroups(25), &calls)))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/?limit=10")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+
+	var page GroupPage
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("failed to decode page: %v", err)
+	}
+	resp.Body.Close()
+
+	if page.NextCursor == "" {
+		t.Fatal("the first page of 25 groups should advertise a successor")
+	}
+
+	calls = nil
+
+	resp, err = http.Get(srv.URL + "/?limit=100&cursor=" + url.QueryEscape(page.NextCursor))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	if len(calls) != 0 {
+		t.Error("a rejected cursor should not reach the identity provider")
+	}
+}
+
+// The limit is clamped and defaulted before the cursor is minted, so two requests that ask for
+// different limits but resolve to the same effective one still page together.
+func TestListGroupsHandlerCursorSurvivesEquivalentLimits(t *testing.T) {
+	var calls []PageRequest
+	srv := httptest.NewServer(ListGroupsHandler("auth0", pagedFetch(testGroups(250), &calls)))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/?limit=100")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+
+	var page GroupPage
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("failed to decode page: %v", err)
+	}
+	resp.Body.Close()
+
+	if page.NextCursor == "" {
+		t.Fatal("the first page of 250 groups should advertise a successor")
+	}
+
+	// Over the cap, so it clamps back to the same effective page size.
+	resp, err = http.Get(srv.URL + "/?limit=100000&cursor=" + url.QueryEscape(page.NextCursor))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 }
 

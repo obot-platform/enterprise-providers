@@ -52,7 +52,7 @@ func ParseGroupPageRequest(providerKind string, query url.Values) (PageRequest, 
 	}
 	req.Limit = min(limit, MaxGroupPageSize)
 
-	if req.Cursor, err = DecodeCursor(providerKind, req.NameFilter, query.Get("cursor")); err != nil {
+	if req.Cursor, err = DecodeCursor(providerKind, req.NameFilter, req.Limit, query.Get("cursor")); err != nil {
 		return PageRequest{}, err
 	}
 

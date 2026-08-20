@@ -3,8 +3,11 @@ package profile
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/directoryobjects"
 	"github.com/microsoftgraph/msgraph-sdk-go/groups"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
+	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
 	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
@@ -38,15 +42,35 @@ var photoCache = expirable.NewLRU[string, string](1000, nil, time.Hour)
 
 const graphGroupsURLPrefix = "https://graph.microsoft.com/v1.0/groups?"
 
+// graphHosts are the Microsoft Graph hosts a next link is allowed to name. They are the same hosts
+// the SDK itself will attach a token to; see the validHosts list in msgraph-sdk-go.
+var graphHosts = map[string]struct{}{
+	"graph.microsoft.com":             {},
+	"graph.microsoft.us":              {},
+	"dod-graph.microsoft.us":          {},
+	"graph.microsoft.de":              {},
+	"microsoftgraph.chinacloudapi.cn": {},
+	"canary.graph.microsoft.com":      {},
+}
+
+// graphGroupsPaths are the request paths a group listing next link may have.
+var graphGroupsPaths = map[string]struct{}{
+	"/v1.0/groups": {},
+	"/beta/groups": {},
+}
+
 // FetchGroupPage retrieves one page of the tenant's groups, following Graph's @odata.nextLink as
 // the continuation token.
 func FetchGroupPage(ctx context.Context, client *msgraphsdkgo.GraphServiceClient, req authcommon.PageRequest) (authcommon.PageResult, error) {
 	if req.Cursor != "" {
-		result, err := client.Groups().WithUrl(expandNextLink(req.Cursor)).Get(ctx, nil)
+		link, err := expandNextLink(req.Cursor)
 		if err != nil {
-			// A next link that Graph no longer accepts has usually expired. Report it as a bad
-			// cursor so the caller restarts from the first page instead of treating it as an outage.
-			return authcommon.PageResult{}, fmt.Errorf("%w: failed to follow group page link: %v", authcommon.ErrInvalidCursor, err)
+			return authcommon.PageResult{}, err
+		}
+
+		result, err := client.Groups().WithUrl(link).Get(ctx, nil)
+		if err != nil {
+			return authcommon.PageResult{}, classifyNextLinkError(ctx, err)
 		}
 
 		return groupPageFrom(result), nil
@@ -101,9 +125,8 @@ func FetchGroupsByIDs(ctx context.Context, client *msgraphsdkgo.GraphServiceClie
 
 // groupsRequestConfiguration builds the query for the first page of a listing.
 func groupsRequestConfiguration(req authcommon.PageRequest, ordered bool) *groups.GroupsRequestBuilderGetRequestConfiguration {
-	top := int32(req.Limit)
 	params := &groups.GroupsRequestBuilderGetQueryParameters{
-		Top: &top,
+		Top: new(int32(req.Limit)),
 		// Only these two fields are used; the default group object is far larger.
 		Select: []string{"id", "displayName"},
 	}
@@ -115,8 +138,7 @@ func groupsRequestConfiguration(req authcommon.PageRequest, ordered bool) *group
 	if req.NameFilter != "" {
 		// Graph offers a prefix match here. A contains-style match would mean $search, which needs
 		// the advanced query header; see the note on FetchGroupPage.
-		filter := fmt.Sprintf("startswith(displayName,'%s')", escapeODataString(req.NameFilter))
-		params.Filter = &filter
+		params.Filter = new(fmt.Sprintf("startswith(displayName,'%s')", escapeODataString(req.NameFilter)))
 	}
 
 	return &groups.GroupsRequestBuilderGetRequestConfiguration{QueryParameters: params}
@@ -157,23 +179,68 @@ func compactNextLink(link string) string {
 }
 
 // expandNextLink restores a cursor produced by compactNextLink to a full URL. A cursor that is
-// already absolute is one compactNextLink did not recognize, so it is used as it is.
-func expandNextLink(cursor string) string {
-	if strings.Contains(cursor, "://") {
-		return cursor
+// already absolute is one compactNextLink did not recognize, such as a link from a national cloud.
+//
+// The result is handed to a request builder that will fetch whatever URL it is given, and a cursor
+// is only signed to the extent that its envelope is, so the URL is checked against the Graph hosts
+// and group paths before it is used. Anything else is a bad cursor rather than a request to make.
+func expandNextLink(cursor string) (string, error) {
+	link := cursor
+	if !strings.Contains(link, "://") {
+		link = graphGroupsURLPrefix + link
 	}
 
-	return graphGroupsURLPrefix + cursor
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return "", fmt.Errorf("%w: group page link is not a URL", authcommon.ErrInvalidCursor)
+	}
+
+	if parsed.Scheme != "https" {
+		return "", fmt.Errorf("%w: group page link is not https", authcommon.ErrInvalidCursor)
+	}
+	if parsed.User != nil {
+		// Graph never mints a link with credentials in it, and carrying them into the request is
+		// not something a cursor gets to ask for.
+		return "", fmt.Errorf("%w: group page link carries credentials", authcommon.ErrInvalidCursor)
+	}
+	if _, ok := graphHosts[strings.ToLower(parsed.Hostname())]; !ok {
+		return "", fmt.Errorf("%w: group page link does not point at Microsoft Graph", authcommon.ErrInvalidCursor)
+	}
+	if _, ok := graphGroupsPaths[strings.TrimSuffix(parsed.Path, "/")]; !ok {
+		return "", fmt.Errorf("%w: group page link is not a group listing", authcommon.ErrInvalidCursor)
+	}
+
+	return parsed.String(), nil
+}
+
+func classifyNextLinkError(ctx context.Context, err error) error {
+	wrapped := fmt.Errorf("failed to follow group page link: %w", err)
+	if ctx.Err() != nil {
+		return wrapped
+	}
+
+	var odataErr *odataerrors.ODataError
+	if !errors.As(err, &odataErr) {
+		return wrapped
+	}
+
+	switch odataErr.ResponseStatusCode {
+	case http.StatusBadRequest, http.StatusNotFound:
+		// Graph rejected the link, which is what an expired or malformed skip token looks like.
+		// Report it as a bad cursor so the caller restarts from the first page.
+		return fmt.Errorf("%w: failed to follow group page link: %v", authcommon.ErrInvalidCursor, err)
+	default:
+		return wrapped
+	}
 }
 
 // FetchUserGroupInfos retrieves all groups the specified user belongs to.
 // Uses transitive membership to include nested groups.
 // Requires application permission User.Read.All.
 func FetchUserGroupInfos(ctx context.Context, client *msgraphsdkgo.GraphServiceClient, userID string) (state.GroupInfoList, error) {
-	top := int32(graphPageSize)
 	cfg := &users.ItemTransitiveMemberOfRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemTransitiveMemberOfRequestBuilderGetQueryParameters{
-			Top: &top,
+			Top: new(int32(graphPageSize)),
 		},
 	}
 
@@ -225,11 +292,9 @@ func FetchUserGroupInfos(ctx context.Context, client *msgraphsdkgo.GraphServiceC
 }
 
 func lookupGuestByEmail(ctx context.Context, client *msgraphsdkgo.GraphServiceClient, email string) (models.Userable, error) {
-	filter := fmt.Sprintf("mail eq '%[1]s' or userPrincipalName eq '%[1]s'", email)
-
 	cfg := &users.UsersRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.UsersRequestBuilderGetQueryParameters{
-			Filter: &filter,
+			Filter: new(fmt.Sprintf("mail eq '%[1]s' or userPrincipalName eq '%[1]s'", email)),
 		},
 	}
 
