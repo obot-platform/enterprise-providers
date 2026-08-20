@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -119,10 +118,8 @@ func FetchGroupPage(ctx context.Context, apiClient *client.APIClient, req authco
 	query.Set("skip", strconv.Itoa(skip))
 	query.Set("sort", "name")
 	if req.NameFilter != "" {
-		// The filter value is interpolated into a server-side regex, so it must be quoted. (?i)
-		// makes the match case-insensitive and leaving it unanchored makes it a substring match,
-		// which matches how the other providers and the Obot-side cache behave.
-		query.Set("filter", "name:$regex:(?i)"+regexp.QuoteMeta(req.NameFilter))
+		// This `name:search` filter is a case-insensitive substring match.
+		query.Set("filter", "name:search:"+req.NameFilter)
 	}
 
 	resp, err := apiClient.DoRequest(ctx, http.MethodGet, "/api/v2/usergroups", query, nil)
