@@ -577,3 +577,40 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// FetchGroupsByIDs resolves user group IDs to their current names.
+//
+// The v2 API has no batch group read, so this is one request per ID; authcommon overlaps them and
+// caps how many IDs a single request may carry.
+func FetchGroupsByIDs(ctx context.Context, apiClient *client.APIClient, ids []string) (state.GroupInfoList, error) {
+	return authcommon.ResolveGroupsByLookup(ctx, ids, func(ctx context.Context, id string) (*state.GroupInfo, error) {
+		resp, err := apiClient.DoRequest(ctx, http.MethodGet, "/api/v2/usergroups/"+url.PathEscape(id), nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch JumpCloud group %s: %w", id, err)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read JumpCloud group %s response: %w", id, err)
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			// The group was deleted in JumpCloud while a policy still references it.
+			return nil, nil
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("usergroups endpoint returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var group userGroup
+		if err := json.Unmarshal(body, &group); err != nil {
+			return nil, fmt.Errorf("failed to decode JumpCloud group %s response: %w", id, err)
+		}
+		if group.ID == "" {
+			return nil, nil
+		}
+
+		return &state.GroupInfo{ID: "jumpcloud/" + group.ID, Name: group.Name}, nil
+	})
+}

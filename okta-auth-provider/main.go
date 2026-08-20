@@ -154,6 +154,7 @@ func main() {
 	mux.HandleFunc("/obot-get-state", state.ObotGetState(oauthProxy))
 	mux.HandleFunc("/obot-get-user-info", getUserInfo)
 	mux.HandleFunc("/obot-list-auth-groups", authcommon.ListGroupsHandler("okta", srv.fetchGroupPage))
+	mux.HandleFunc("/obot-get-auth-groups", authcommon.GetGroupsHandler("okta", srv.fetchGroupsByIDs))
 	mux.HandleFunc("/obot-list-user-auth-groups", srv.listUserGroups)
 	mux.HandleFunc("GET /obot-get-group-migration-mapping", srv.getGroupMigrationMapping)
 	mux.HandleFunc("/", oauthProxy.ServeHTTP)
@@ -249,4 +250,8 @@ func getUserInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to encode user info: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *server) fetchGroupsByIDs(ctx context.Context, ids []string) (state.GroupInfoList, error) {
+	return profile.FetchGroupsByIDs(ctx, s.serviceClient, ids)
 }

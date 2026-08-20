@@ -59,3 +59,31 @@ func ListGroupsHandler(providerKind string, fetch FetchGroupPageFunc) http.Handl
 		}
 	}
 }
+
+// GetGroupsHandler serves GET /obot-get-auth-groups?ids= for a provider that can resolve group IDs
+// to their current names.
+func GetGroupsHandler(providerKind string, fetch FetchGroupsByIDsFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ids, err := ParseGroupIDs(providerKind, r.URL.Query())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		items := state.GroupInfoList{}
+		if len(ids) > 0 {
+			if items, err = fetch(r.Context(), ids); err != nil {
+				http.Error(w, fmt.Sprintf("failed to resolve groups: %v", err), http.StatusInternalServerError)
+				return
+			}
+			if items == nil {
+				items = state.GroupInfoList{}
+			}
+		}
+
+		if err := json.NewEncoder(w).Encode(GroupList{Items: items}); err != nil {
+			http.Error(w, fmt.Sprintf("failed to encode groups: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+}

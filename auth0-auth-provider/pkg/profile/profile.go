@@ -200,3 +200,37 @@ func convertRolesToGroupInfos(roles []auth0Role) state.GroupInfoList {
 
 	return groupInfos
 }
+
+// FetchGroupsByIDs resolves role IDs to their current names.
+func FetchGroupsByIDs(ctx context.Context, mgmtClient *client.ManagementClient, ids []string) (state.GroupInfoList, error) {
+	return authcommon.ResolveGroupsByLookup(ctx, ids, func(ctx context.Context, id string) (*state.GroupInfo, error) {
+		resp, err := mgmtClient.DoRequest(ctx, http.MethodGet, "/api/v2/roles/"+url.PathEscape(id), nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch role %s: %w", id, err)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read role %s response: %w", id, err)
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			// The role was deleted in Auth0 while a policy still references it.
+			return nil, nil
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("role endpoint returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var role auth0Role
+		if err := json.Unmarshal(body, &role); err != nil {
+			return nil, fmt.Errorf("failed to decode role %s response: %w", id, err)
+		}
+		if role.ID == "" {
+			return nil, nil
+		}
+
+		return &state.GroupInfo{ID: "auth0/" + role.ID, Name: role.Name}, nil
+	})
+}

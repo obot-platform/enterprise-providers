@@ -280,3 +280,25 @@ func selectPreferredGroup(groups []okta.Group) okta.Group {
 
 	return groups[0]
 }
+
+// FetchGroupsByIDs resolves group IDs to their current names.
+//
+// Okta has no batch group read, so this is one request per ID; authcommon overlaps them and caps
+// how many IDs a single request may carry.
+func FetchGroupsByIDs(ctx context.Context, client *okta.APIClient, ids []string) (state.GroupInfoList, error) {
+	return authcommon.ResolveGroupsByLookup(ctx, ids, func(ctx context.Context, id string) (*state.GroupInfo, error) {
+		group, resp, err := client.GroupAPI.GetGroup(ctx, id).Execute()
+		if err != nil {
+			if resp != nil && resp.StatusCode == http.StatusNotFound {
+				// The group was deleted in Okta while a policy still references it.
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to fetch group %s: %w", id, err)
+		}
+		if group == nil {
+			return nil, nil
+		}
+
+		return convertToGroupInfo(*group), nil
+	})
+}

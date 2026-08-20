@@ -41,8 +41,8 @@ type cursorPayload struct {
 }
 
 // FilterFingerprint reduces a name filter to a short token used to detect that a cursor is being
-// replayed against a different search. Hashing rather than embedding the filter keeps directory
-// search terms out of URLs, which tend to end up in logs.
+// replayed against a different search. Only equality matters, so a short non-cryptographic hash is
+// enough and keeps the cursor small. It is not a privacy control.
 func FilterFingerprint(nameFilter string) string {
 	if nameFilter == "" {
 		return ""

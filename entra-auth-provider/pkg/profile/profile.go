@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	msgraphsdkgo "github.com/microsoftgraph/msgraph-sdk-go"
 	msgraphcore "github.com/microsoftgraph/msgraph-sdk-go-core"
+	"github.com/microsoftgraph/msgraph-sdk-go/directoryobjects"
 	"github.com/microsoftgraph/msgraph-sdk-go/groups"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
@@ -66,6 +67,36 @@ func FetchGroupPage(ctx context.Context, client *msgraphsdkgo.GraphServiceClient
 	}
 
 	return groupPageFrom(result), nil
+}
+
+// FetchGroupsByIDs resolves group IDs to their current names.
+func FetchGroupsByIDs(ctx context.Context, client *msgraphsdkgo.GraphServiceClient, ids []string) (state.GroupInfoList, error) {
+	body := directoryobjects.NewGetByIdsPostRequestBody()
+	body.SetIds(ids)
+	// Without this, getByIds returns every kind of directory object an ID might name.
+	body.SetTypes([]string{"group"})
+
+	result, err := client.DirectoryObjects().GetByIds().PostAsGetByIdsPostResponse(ctx, body, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve groups by id: %w", err)
+	}
+	if result == nil {
+		return state.GroupInfoList{}, nil
+	}
+
+	values := result.GetValue()
+	groupInfos := make(state.GroupInfoList, 0, len(values))
+	for _, object := range values {
+		group, ok := object.(models.Groupable)
+		if !ok {
+			continue
+		}
+		if groupInfo := convertToGroupInfo(group); groupInfo != nil {
+			groupInfos = append(groupInfos, *groupInfo)
+		}
+	}
+
+	return groupInfos, nil
 }
 
 // groupsRequestConfiguration builds the query for the first page of a listing.
