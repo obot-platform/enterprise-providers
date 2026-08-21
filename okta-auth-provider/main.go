@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,12 +15,12 @@ import (
 	oauth2proxy "github.com/oauth2-proxy/oauth2-proxy/v7"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/validation"
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/enterprise-providers/okta-auth-provider/pkg/client"
 	"github.com/obot-platform/enterprise-providers/okta-auth-provider/pkg/profile"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/env"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 	"github.com/okta/okta-sdk-golang/v5/okta"
-	"github.com/sahilm/fuzzy"
 )
 
 type Options struct {
@@ -152,7 +153,8 @@ func main() {
 	})
 	mux.HandleFunc("/obot-get-state", state.ObotGetState(oauthProxy))
 	mux.HandleFunc("/obot-get-user-info", getUserInfo)
-	mux.HandleFunc("/obot-list-auth-groups", srv.listGroups)
+	mux.HandleFunc("/obot-list-auth-groups", authcommon.ListGroupsHandler("okta", srv.fetchGroupPage))
+	mux.HandleFunc("/obot-get-auth-groups", authcommon.GetGroupsHandler("okta", srv.fetchGroupsByIDs))
 	mux.HandleFunc("/obot-list-user-auth-groups", srv.listUserGroups)
 	mux.HandleFunc("GET /obot-get-group-migration-mapping", srv.getGroupMigrationMapping)
 	mux.HandleFunc("/", oauthProxy.ServeHTTP)
@@ -169,44 +171,13 @@ func main() {
 	}
 }
 
-// listGroups returns all groups in the Okta organization with optional fuzzy name filtering.
-// Uses service account client. Body is ignored.
-// The Okta SDK automatically handles authentication (JWT signing, token acquisition, caching, refresh).
-func (s *server) listGroups(w http.ResponseWriter, r *http.Request) {
-	// Fetch all groups using service account client
-	// SDK automatically acquires/caches/refreshes tokens as needed
-	groups, err := profile.FetchAllGroupInfos(r.Context(), s.serviceClient)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to fetch groups: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if groups == nil {
-		groups = state.GroupInfoList{}
-	}
-
-	// Apply fuzzy name filtering if requested via query parameter
-	nameFilter := r.URL.Query().Get("name")
-	if nameFilter != "" && len(groups) > 0 {
-		groupNames := make([]string, len(groups))
-		for i, group := range groups {
-			groupNames[i] = group.Name
-		}
-
-		// Use fuzzy matching to find relevant groups by name similarity
-		matches := fuzzy.Find(nameFilter, groupNames)
-
-		var filteredGroups state.GroupInfoList
-		for _, match := range matches {
-			filteredGroups = append(filteredGroups, groups[match.Index])
-		}
-		groups = filteredGroups
-	}
-
-	if err := json.NewEncoder(w).Encode(groups); err != nil {
-		http.Error(w, fmt.Sprintf("failed to encode groups: %v", err), http.StatusInternalServerError)
-		return
-	}
+// fetchGroupPage fetches one page of the Okta organization's groups. Paging, filtering and cursor
+// handling all live in authcommon.ListGroupsHandler, which serves GET /obot-list-auth-groups.
+//
+// Note that groups come back in Okta's own order rather than alphabetically; see the comment on
+// profile.FetchGroupPage for why sorting is not available alongside cursor paging here.
+func (s *server) fetchGroupPage(ctx context.Context, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	return profile.FetchGroupPage(ctx, s.serviceClient, req)
 }
 
 // listUserGroups returns all groups the specified user belongs to.
@@ -279,4 +250,8 @@ func getUserInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to encode user info: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *server) fetchGroupsByIDs(ctx context.Context, ids []string) (state.GroupInfoList, error) {
+	return profile.FetchGroupsByIDs(ctx, s.serviceClient, ids)
 }

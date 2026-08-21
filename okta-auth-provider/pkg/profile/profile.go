@@ -5,12 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 	"github.com/okta/okta-sdk-golang/v5/okta"
+)
+
+const (
+	oktaPageSize = 200
+	maxGroups    = 100000
 )
 
 // UserInfo represents basic user profile information.
@@ -25,26 +33,70 @@ type UserInfo struct {
 // Requires okta.users.read or okta.groups.read scope in the service account token.
 func FetchUserGroupInfos(ctx context.Context, client *okta.APIClient, userID string) (state.GroupInfoList, error) {
 	// Query user-specific groups endpoint (accepts user ID or login/email)
-	groups, _, err := client.UserAPI.ListUserGroups(ctx, userID).Execute()
+	groups, resp, err := client.UserAPI.ListUserGroups(ctx, userID).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch group memberships for user %s: %w", userID, err)
 	}
 
-	return convertOktaGroupsToGroupInfos(groups), nil
-}
-
-// FetchAllGroupInfos fetches all groups in the Okta organization.
-// Uses the Okta Management API endpoint: GET /api/v1/groups
-// This is used for admin selection of groups.
-func FetchAllGroupInfos(ctx context.Context, client *okta.APIClient) (state.GroupInfoList, error) {
-	// List all groups with pagination limit
-	// Using 200 as recommended by Okta best practices
-	groups, _, err := client.GroupAPI.ListGroups(ctx).Limit(200).Execute()
+	allGroups, err := collectRemainingPages(groups, resp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch all groups: %w", err)
+		return nil, fmt.Errorf("failed to fetch group memberships for user %s: %w", userID, err)
 	}
 
-	return convertOktaGroupsToGroupInfos(groups), nil
+	return convertOktaGroupsToGroupInfos(allGroups), nil
+}
+
+// FetchGroupPage fetches one page of groups from the Okta organization.
+// Uses the Okta Management API endpoint: GET /api/v1/groups
+//
+// The continuation token is Okta's "after" cursor, lifted out of the Link header of the previous
+// response.
+//
+// Ordering is Okta's own, not alphabetical. Okta only honors sortBy alongside the "search"
+// parameter, and search is served from an eventually consistent index whose cursor paging can skip
+// or repeat rows, so it is not safe to page over. Sorting each page locally is worse than not
+// sorting at all: it would make every page individually alphabetical while the sequence as a whole
+// stayed arbitrary, which reads as a bug. The name filter is what users navigate with instead.
+func FetchGroupPage(ctx context.Context, client *okta.APIClient, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	r := client.GroupAPI.ListGroups(ctx).Limit(int32(req.Limit))
+	if req.NameFilter != "" {
+		// Okta matches q as a case-insensitive starts-with on the group name. It is the
+		// pagination-safe filter; see the note on search above.
+		r = r.Q(req.NameFilter)
+	}
+	if req.Cursor != "" {
+		r = r.After(req.Cursor)
+	}
+
+	groups, resp, err := r.Execute()
+	if err != nil {
+		return authcommon.PageResult{}, fmt.Errorf("failed to fetch groups: %w", err)
+	}
+
+	nextCursor, err := nextGroupCursor(resp)
+	if err != nil {
+		return authcommon.PageResult{}, err
+	}
+
+	return authcommon.PageResult{
+		Items:      convertOktaGroupsToGroupInfos(groups),
+		NextCursor: nextCursor,
+	}, nil
+}
+
+// nextGroupCursor extracts Okta's "after" cursor from the next-page link of a list response.
+// Okta hands back a full URL; only the after value is worth carrying, and it is short.
+func nextGroupCursor(resp *okta.APIResponse) (string, error) {
+	if resp == nil || !resp.HasNextPage() {
+		return "", nil
+	}
+
+	next, err := url.Parse(resp.NextPage())
+	if err != nil {
+		return "", fmt.Errorf("failed to parse Okta next page link: %w", err)
+	}
+
+	return next.Query().Get("after"), nil
 }
 
 // convertOktaGroupsToGroupInfos converts a slice of Okta groups to GroupInfo structs.
@@ -170,17 +222,33 @@ func BuildGroupMigrationMapping(ctx context.Context, client *okta.APIClient) ([]
 
 // fetchAllGroups fetches all groups from Okta, paginating through all pages.
 func fetchAllGroups(ctx context.Context, client *okta.APIClient) ([]okta.Group, error) {
-	groups, resp, err := client.GroupAPI.ListGroups(ctx).Limit(200).Execute()
+	groups, resp, err := client.GroupAPI.ListGroups(ctx).Limit(oktaPageSize).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch groups: %w", err)
 	}
 
-	allGroups := groups
-	for resp.HasNextPage() {
-		var nextGroups []okta.Group
-		resp, err = resp.Next(&nextGroups)
-		if err != nil {
+	return collectRemainingPages(groups, resp)
+}
+
+// collectRemainingPages walks the Link-header cursor from an Okta list call and appends every
+// remaining page to the first one. Okta returns a single page per request.
+func collectRemainingPages(first []okta.Group, resp *okta.APIResponse) ([]okta.Group, error) {
+	allGroups := first
+	for resp != nil && resp.HasNextPage() {
+		if len(allGroups) >= maxGroups {
+			slog.Warn("Reached the maximum number of Okta groups that can be listed; some groups were not loaded", "groupLimit", maxGroups)
+			break
+		}
+
+		var (
+			nextGroups []okta.Group
+			err        error
+		)
+		if resp, err = resp.Next(&nextGroups); err != nil {
 			return nil, fmt.Errorf("failed to fetch next page of groups: %w", err)
+		}
+		if len(nextGroups) == 0 {
+			break
 		}
 		allGroups = append(allGroups, nextGroups...)
 	}
@@ -211,4 +279,26 @@ func selectPreferredGroup(groups []okta.Group) okta.Group {
 	})
 
 	return groups[0]
+}
+
+// FetchGroupsByIDs resolves group IDs to their current names.
+//
+// Okta has no batch group read, so this is one request per ID; authcommon overlaps them and caps
+// how many IDs a single request may carry.
+func FetchGroupsByIDs(ctx context.Context, client *okta.APIClient, ids []string) (state.GroupInfoList, error) {
+	return authcommon.ResolveGroupsByLookup(ctx, ids, func(ctx context.Context, id string) (*state.GroupInfo, error) {
+		group, resp, err := client.GroupAPI.GetGroup(ctx, id).Execute()
+		if err != nil {
+			if resp != nil && resp.StatusCode == http.StatusNotFound {
+				// The group was deleted in Okta while a policy still references it.
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to fetch group %s: %w", id, err)
+		}
+		if group == nil {
+			return nil, nil
+		}
+
+		return convertToGroupInfo(*group), nil
+	})
 }

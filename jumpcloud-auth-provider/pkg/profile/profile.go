@@ -5,12 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/enterprise-providers/jumpcloud-auth-provider/pkg/client"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
+)
+
+const (
+	bulkGroupLookupThreshold = 50
+	maxGroups                = 100000
 )
 
 // UserInfo represents basic user profile information.
@@ -91,13 +99,75 @@ func GetUserInfo(ctx context.Context, accessToken, issuerURL string, apiClient *
 	}, nil
 }
 
-// FetchAllGroupInfos fetches all JumpCloud user groups.
-func FetchAllGroupInfos(ctx context.Context, apiClient *client.APIClient) (state.GroupInfoList, error) {
-	groups, err := fetchAllGroups(ctx, apiClient)
-	if err != nil {
-		return nil, err
+// FetchGroupPage fetches one page of JumpCloud user groups.
+//
+// The continuation token is the skip offset: the v2 API pages with limit/skip and has no opaque
+// cursor of its own. Results are sorted by name server-side, which makes the offset stable enough
+// to page over.
+func FetchGroupPage(ctx context.Context, apiClient *client.APIClient, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	skip := 0
+	if req.Cursor != "" {
+		var err error
+		if skip, err = strconv.Atoi(req.Cursor); err != nil || skip < 0 {
+			return authcommon.PageResult{}, fmt.Errorf("%w: %q is not a skip offset", authcommon.ErrInvalidCursor, req.Cursor)
+		}
 	}
-	return convertGroupsToGroupInfos(groups), nil
+
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(req.Limit))
+	query.Set("skip", strconv.Itoa(skip))
+	query.Set("sort", "name")
+	if req.NameFilter != "" {
+		// This `name:search` filter is a case-insensitive substring match.
+		query.Set("filter", "name:search:"+req.NameFilter)
+	}
+
+	resp, err := apiClient.DoRequest(ctx, http.MethodGet, "/api/v2/usergroups", query, nil)
+	if err != nil {
+		return authcommon.PageResult{}, fmt.Errorf("failed to fetch JumpCloud groups: %w", err)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return authcommon.PageResult{}, fmt.Errorf("failed to read JumpCloud groups response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return authcommon.PageResult{}, fmt.Errorf("usergroups endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var groups []userGroup
+	if err := json.Unmarshal(body, &groups); err != nil {
+		return authcommon.PageResult{}, fmt.Errorf("failed to decode JumpCloud groups response: %w", err)
+	}
+
+	return authcommon.PageResult{
+		Items:      convertGroupsToGroupInfos(groups),
+		NextCursor: nextGroupCursor(skip, len(groups), req.Limit, resp.Header.Get("X-Total-Count")),
+	}, nil
+}
+
+// nextGroupCursor decides whether another page exists. JumpCloud reports the unpaged size in
+// X-Total-Count, which gives an exact answer; without it, a full page is taken to mean there may
+// be more, which costs at most one extra empty request at the end.
+func nextGroupCursor(skip, fetched, limit int, totalHeader string) string {
+	if fetched == 0 {
+		return ""
+	}
+
+	if total, err := strconv.Atoi(totalHeader); err == nil {
+		if skip+fetched >= total {
+			return ""
+		}
+		return strconv.Itoa(skip + fetched)
+	}
+
+	if fetched < limit {
+		return ""
+	}
+
+	return strconv.Itoa(skip + fetched)
 }
 
 // FetchUserGroupInfos fetches all JumpCloud user groups for a specific user.
@@ -294,12 +364,20 @@ func fetchAllGroups(ctx context.Context, apiClient *client.APIClient) ([]userGro
 		if len(groups) < limit {
 			break
 		}
+		if len(allGroups) >= maxGroups {
+			slog.Warn("Reached the maximum number of JumpCloud groups that can be listed; some groups were not loaded", "groupLimit", maxGroups)
+			break
+		}
 	}
 
 	return allGroups, nil
 }
 
 func fetchGroupsByIDs(ctx context.Context, apiClient *client.APIClient, groupIDs []string) ([]userGroup, error) {
+	if len(groupIDs) > bulkGroupLookupThreshold {
+		return fetchGroupsByIDsInBulk(ctx, apiClient, groupIDs)
+	}
+
 	groups := make([]userGroup, 0, len(groupIDs))
 
 	for _, groupID := range groupIDs {
@@ -308,27 +386,7 @@ func fetchGroupsByIDs(ctx context.Context, apiClient *client.APIClient, groupIDs
 			return nil, err
 		}
 		if shouldFallback {
-			allGroups, err := fetchAllGroups(ctx, apiClient)
-			if err != nil {
-				return nil, err
-			}
-
-			memberOfSet := make(map[string]struct{}, len(groupIDs))
-			for _, id := range groupIDs {
-				memberOfSet[id] = struct{}{}
-			}
-
-			filteredGroups := make([]userGroup, 0, len(groupIDs))
-			for _, candidate := range allGroups {
-				if candidate.ID == "" {
-					continue
-				}
-				if _, ok := memberOfSet[candidate.ID]; !ok {
-					continue
-				}
-				filteredGroups = append(filteredGroups, candidate)
-			}
-			return filteredGroups, nil
+			return fetchGroupsByIDsInBulk(ctx, apiClient, groupIDs)
 		}
 		if group == nil {
 			// Missing groups are ignored so transient membership/listing races do not fail login.
@@ -339,6 +397,32 @@ func fetchGroupsByIDs(ctx context.Context, apiClient *client.APIClient, groupIDs
 	}
 
 	return groups, nil
+}
+
+// fetchGroupsByIDsInBulk lists every group once and keeps those the user is a member of.
+func fetchGroupsByIDsInBulk(ctx context.Context, apiClient *client.APIClient, groupIDs []string) ([]userGroup, error) {
+	allGroups, err := fetchAllGroups(ctx, apiClient)
+	if err != nil {
+		return nil, err
+	}
+
+	memberOfSet := make(map[string]struct{}, len(groupIDs))
+	for _, id := range groupIDs {
+		memberOfSet[id] = struct{}{}
+	}
+
+	filteredGroups := make([]userGroup, 0, len(groupIDs))
+	for _, candidate := range allGroups {
+		if candidate.ID == "" {
+			continue
+		}
+		if _, ok := memberOfSet[candidate.ID]; !ok {
+			continue
+		}
+		filteredGroups = append(filteredGroups, candidate)
+	}
+
+	return filteredGroups, nil
 }
 
 func fetchGroupByID(ctx context.Context, apiClient *client.APIClient, groupID string) (*userGroup, bool, error) {
@@ -489,4 +573,41 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// FetchGroupsByIDs resolves user group IDs to their current names.
+//
+// The v2 API has no batch group read, so this is one request per ID; authcommon overlaps them and
+// caps how many IDs a single request may carry.
+func FetchGroupsByIDs(ctx context.Context, apiClient *client.APIClient, ids []string) (state.GroupInfoList, error) {
+	return authcommon.ResolveGroupsByLookup(ctx, ids, func(ctx context.Context, id string) (*state.GroupInfo, error) {
+		resp, err := apiClient.DoRequest(ctx, http.MethodGet, "/api/v2/usergroups/"+url.PathEscape(id), nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch JumpCloud group %s: %w", id, err)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read JumpCloud group %s response: %w", id, err)
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			// The group was deleted in JumpCloud while a policy still references it.
+			return nil, nil
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("usergroups endpoint returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var group userGroup
+		if err := json.Unmarshal(body, &group); err != nil {
+			return nil, fmt.Errorf("failed to decode JumpCloud group %s response: %w", id, err)
+		}
+		if group.ID == "" {
+			return nil, nil
+		}
+
+		return &state.GroupInfo{ID: "jumpcloud/" + group.ID, Name: group.Name}, nil
+	})
 }

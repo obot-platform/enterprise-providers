@@ -2,16 +2,22 @@ module github.com/obot-platform/enterprise-providers/entra-auth-provider
 
 go 1.26.4
 
-replace github.com/oauth2-proxy/oauth2-proxy/v7 => github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20260718004156-5704f042a6ff
+replace (
+	github.com/oauth2-proxy/oauth2-proxy/v7 => github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20260718004156-5704f042a6ff
+	github.com/obot-platform/enterprise-providers/authcommon => ../authcommon
+)
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/microsoft/kiota-abstractions-go v1.9.2
+	github.com/microsoft/kiota-http-go v1.5.5
 	github.com/microsoftgraph/msgraph-sdk-go v1.79.0
+	github.com/microsoftgraph/msgraph-sdk-go-core v1.3.2
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
+	github.com/obot-platform/enterprise-providers/authcommon v0.0.0
 	github.com/obot-platform/providers/auth-providers-common v0.0.0-20260717172559-9ab827189ee6
-	github.com/sahilm/fuzzy v0.1.1
 )
 
 require (
@@ -50,14 +56,11 @@ require (
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/justinas/alice v1.2.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
-	github.com/microsoft/kiota-abstractions-go v1.9.2 // indirect
 	github.com/microsoft/kiota-authentication-azure-go v1.3.0 // indirect
-	github.com/microsoft/kiota-http-go v1.5.5 // indirect
 	github.com/microsoft/kiota-serialization-form-go v1.1.2 // indirect
 	github.com/microsoft/kiota-serialization-json-go v1.1.2 // indirect
 	github.com/microsoft/kiota-serialization-multipart-go v1.1.2 // indirect
 	github.com/microsoft/kiota-serialization-text-go v1.1.2 // indirect
-	github.com/microsoftgraph/msgraph-sdk-go-core v1.3.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
