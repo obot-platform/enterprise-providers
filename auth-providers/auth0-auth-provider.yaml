@@ -66,3 +66,4 @@ optionalConfigurationParameters:
     sensitive: false
     hidden: true
 postgresTablePrefix: "auth0_"
+groupIDPrefix: "auth0/"

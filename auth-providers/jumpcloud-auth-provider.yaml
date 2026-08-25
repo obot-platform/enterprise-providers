@@ -81,3 +81,4 @@ optionalConfigurationParameters:
     description: "Set to true to enable request, auth, and standard logging for the auth provider. Default: false"
     sensitive: false
 postgresTablePrefix: "jumpcloud_"
+groupIDPrefix: "jumpcloud/"
