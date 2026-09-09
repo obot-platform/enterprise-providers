@@ -1,0 +1,14 @@
+# Git metadata is needed by package-providers.sh and Go's VCS build information.
+**/bin
+**/node_modules
+**/vendor
+**/venv
+**/.venv
+**/__pycache__
+**/*.swp
+**/.DS_Store
+.codebase-memory
+.idea
+.vscode
+.cursor
+thoughts
