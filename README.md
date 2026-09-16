@@ -1,6 +1,14 @@
 # Enterprise Providers
 
-This repo contains closed source, enterprise-only providers for Obot.
+> [!WARNING]
+> This repository is deprecated. Provider development has moved to
+> [obot-platform/providers](https://github.com/obot-platform/providers).
+
+Do not open new provider changes here. The repository and its existing release
+artifacts remain available for older Obot releases that still consume the
+separate enterprise-providers image.
+
+The information below documents the legacy build.
 
 `make build` produces static Go binaries with absolute build paths and debug symbols
 removed. Set `CGO_ENABLED=1` if a local build requires cgo.
