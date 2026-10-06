@@ -37,13 +37,19 @@ type Options struct {
 	LoggingEnabled                    string `usage:"Enable oauth2-proxy logging" optional:"true" env:"OBOT_AUTH_PROVIDER_ENABLE_LOGGING"`
 	AuthTokenRefreshDuration          string `usage:"Duration to refresh auth token after" optional:"true" default:"1h" env:"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"`
 
-	// These two are marked optional to make it easier for people to migrate from before they were added, to after they were added.
-	// They are still enforced as required by the Obot API.
+	// These two are the Okta API Services credentials, and Obot no longer always requires them. Providing both selects
+	// directory synchronization through the Okta Management API. Omitting both leaves the directory endpoints
+	// unavailable, and Obot provisions users and groups through SCIM instead. Providing only one is a startup error.
 	ServiceClientID   string `env:"OBOT_OKTA_AUTH_PROVIDER_SERVICE_CLIENT_ID" optional:"true"`
 	ServicePrivateKey string `env:"OBOT_OKTA_AUTH_PROVIDER_SERVICE_PRIVATE_KEY" optional:"true"`
 }
 
+// directoryUnavailableMessage is what every directory endpoint answers when the Okta API Services credentials are
+// not configured.
+const directoryUnavailableMessage = "Okta API Services credentials are not configured, so directory lookups are unavailable"
+
 type server struct {
+	// serviceClient calls the Okta Management API. It is nil when the API Services credentials are not configured.
 	serviceClient *okta.APIClient
 }
 
@@ -125,21 +131,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize service account client for Okta Management API calls
-	// The SDK automatically handles token acquisition, caching, and refresh
-	serviceClient, err := client.NewServiceClient(
-		opts.ServiceClientID,
-		opts.ServicePrivateKey,
-		opts.IssuerURL,
-		[]string{"okta.users.read", "okta.groups.read"},
-	)
+	hasServiceCredentials, err := serviceCredentialsConfigured(opts.ServiceClientID, opts.ServicePrivateKey)
 	if err != nil {
-		fmt.Printf("ERROR: okta-auth-provider: failed to create service client: %v\n", err)
+		fmt.Printf("ERROR: okta-auth-provider: invalid API Services credentials: %v\n", err)
 		os.Exit(1)
 	}
 
-	srv := &server{
-		serviceClient: serviceClient,
+	// Initialize service account client for Okta Management API calls, which only the directory endpoints make.
+	// Without API Services credentials it stays nil, and those endpoints answer 503.
+	// The SDK automatically handles token acquisition, caching, and refresh
+	var serviceClient *okta.APIClient
+	if hasServiceCredentials {
+		serviceClient, err = client.NewServiceClient(
+			strings.TrimSpace(opts.ServiceClientID),
+			opts.ServicePrivateKey,
+			opts.IssuerURL,
+			[]string{"okta.users.read", "okta.groups.read"},
+		)
+		if err != nil {
+			fmt.Printf("ERROR: okta-auth-provider: failed to create service client: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	port := os.Getenv("PORT")
@@ -153,10 +165,7 @@ func main() {
 	})
 	mux.HandleFunc("/obot-get-state", state.ObotGetState(oauthProxy))
 	mux.HandleFunc("/obot-get-user-info", getUserInfo)
-	mux.HandleFunc("/obot-list-auth-groups", authcommon.ListGroupsHandler("okta", srv.fetchGroupPage))
-	mux.HandleFunc("/obot-get-auth-groups", authcommon.GetGroupsHandler("okta", srv.fetchGroupsByIDs))
-	mux.HandleFunc("/obot-list-user-auth-groups", srv.listUserGroups)
-	mux.HandleFunc("GET /obot-get-group-migration-mapping", srv.getGroupMigrationMapping)
+	registerDirectoryRoutes(mux, serviceClient)
 	mux.HandleFunc("/", oauthProxy.ServeHTTP)
 
 	listenHost := os.Getenv("OBOT_PROVIDER_LISTEN_HOST")
@@ -168,6 +177,51 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); !errors.Is(err, http.ErrServerClosed) {
 		fmt.Printf("ERROR: okta-auth-provider: failed to listen and serve: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// serviceCredentialsConfigured reports whether both Okta API Services credentials are configured. Whitespace-only
+// values count as absent. Configuring only one of the two is an error rather than a quiet fallback to no directory,
+// because it is almost certainly a mistake.
+func serviceCredentialsConfigured(clientID, privateKey string) (bool, error) {
+	hasClientID := strings.TrimSpace(clientID) != ""
+	hasPrivateKey := strings.TrimSpace(privateKey) != ""
+
+	switch {
+	case hasClientID && hasPrivateKey:
+		return true, nil
+	case hasClientID:
+		return false, errors.New("OBOT_OKTA_AUTH_PROVIDER_SERVICE_CLIENT_ID is set but OBOT_OKTA_AUTH_PROVIDER_SERVICE_PRIVATE_KEY is not; set both for directory synchronization, or neither when Obot provisions users and groups through SCIM")
+	case hasPrivateKey:
+		return false, errors.New("OBOT_OKTA_AUTH_PROVIDER_SERVICE_PRIVATE_KEY is set but OBOT_OKTA_AUTH_PROVIDER_SERVICE_CLIENT_ID is not; set both for directory synchronization, or neither when Obot provisions users and groups through SCIM")
+	default:
+		return false, nil
+	}
+}
+
+// registerDirectoryRoutes registers the endpoints Obot uses to read the Okta directory. Every one of them calls the
+// Management API, so when serviceClient is nil each answers 503 instead. They stay registered either way, so a
+// directory request never falls through to the oauth2-proxy handler at /.
+func registerDirectoryRoutes(mux *http.ServeMux, serviceClient *okta.APIClient) {
+	srv := &server{
+		serviceClient: serviceClient,
+	}
+
+	mux.HandleFunc("/obot-list-auth-groups", srv.requireServiceClient(authcommon.ListGroupsHandler("okta", srv.fetchGroupPage)))
+	mux.HandleFunc("/obot-get-auth-groups", srv.requireServiceClient(authcommon.GetGroupsHandler("okta", srv.fetchGroupsByIDs)))
+	mux.HandleFunc("/obot-list-user-auth-groups", srv.requireServiceClient(srv.listUserGroups))
+	mux.HandleFunc("GET /obot-get-group-migration-mapping", srv.requireServiceClient(srv.getGroupMigrationMapping))
+}
+
+// requireServiceClient returns next when there is a Management API client to serve it, and otherwise a handler
+// that answers every request with 503 Service Unavailable.
+func (s *server) requireServiceClient(next http.HandlerFunc) http.HandlerFunc {
+	if s.serviceClient != nil {
+		return next
+	}
+
+	return func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, directoryUnavailableMessage, http.StatusServiceUnavailable)
 	}
 }
 
