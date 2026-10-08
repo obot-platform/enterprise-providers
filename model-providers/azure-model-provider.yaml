@@ -5,17 +5,57 @@ validateArgs:
 icon: "/admin/assets/azure_openai_icon.svg"
 iconDark: "/admin/assets/azure_openai_icon.svg"
 description: "Model provider for Azure OpenAI/Foundry models using API key authentication"
+locales:
+  ja:
+    name: "Azure（API キー）"
+    description: "API キー認証を使用する Azure OpenAI/Foundry モデルのプロバイダー"
+  ko:
+    name: "Azure(API 키)"
+    description: "API 키 인증을 사용하는 Azure OpenAI/Foundry 모델 공급자"
+  zh-CN:
+    name: "Azure（API 密钥）"
+    description: "使用 API 密钥身份验证的 Azure OpenAI/Foundry 模型提供方"
 link: "https://azure.microsoft.com/en-us/products/ai-services/openai-service"
 requiredConfigurationParameters:
   - name: "OBOT_AZURE_MODEL_PROVIDER_ENDPOINT"
     friendlyName: "Azure Endpoint"
     description: "Azure service endpoint URL (e.g. https://my-resource.cognitiveservices.azure.com/ or https://my-resource.openai.azure.com/)"
+    locales:
+      ja:
+        friendlyName: "Azure エンドポイント"
+        description: "Azure サービスのエンドポイント URL（例: https://my-resource.cognitiveservices.azure.com/ または https://my-resource.openai.azure.com/）。"
+      ko:
+        friendlyName: "Azure 엔드포인트"
+        description: "Azure 서비스 엔드포인트 URL입니다(예: https://my-resource.cognitiveservices.azure.com/ 또는 https://my-resource.openai.azure.com/)."
+      zh-CN:
+        friendlyName: "Azure 端点"
+        description: "Azure 服务端点 URL（例如 https://my-resource.cognitiveservices.azure.com/ 或 https://my-resource.openai.azure.com/）。"
     sensitive: false
   - name: "OBOT_AZURE_MODEL_PROVIDER_API_KEY"
     friendlyName: "API Key"
     description: "Azure API key"
+    locales:
+      ja:
+        friendlyName: "API キー"
+        description: "Azure API キー"
+      ko:
+        friendlyName: "API 키"
+        description: "Azure API 키"
+      zh-CN:
+        friendlyName: "API 密钥"
+        description: "Azure API 密钥"
     sensitive: true
   - name: "OBOT_AZURE_MODEL_PROVIDER_DEPLOYMENTS"
     friendlyName: "Deployments"
     description: "List of deployments (format: deployment[:usage[:dialect]]). Usage defaults to 'llm' and supports 'llm', 'reasoning-llm', 'text-embedding', or 'image-generation'. Dialect defaults to OpenAI and supports 'openai' or 'anthropic'."
+    locales:
+      ja:
+        friendlyName: "デプロイメント"
+        description: "デプロイメントの一覧（形式: deployment[:usage[:dialect]]）。usage の既定値は 'llm' で、'llm'、'reasoning-llm'、'text-embedding'、'image-generation' を指定できます。dialect の既定値は OpenAI で、'openai' または 'anthropic' を指定できます。"
+      ko:
+        friendlyName: "배포"
+        description: "배포 목록입니다(형식: deployment[:usage[:dialect]]). usage 기본값은 'llm'이며 'llm', 'reasoning-llm', 'text-embedding', 'image-generation'을 지원합니다. dialect 기본값은 OpenAI이며 'openai' 또는 'anthropic'을 지원합니다."
+      zh-CN:
+        friendlyName: "部署"
+        description: "部署列表（格式：deployment[:usage[:dialect]]）。usage 默认为 'llm'，支持 'llm'、'reasoning-llm'、'text-embedding' 和 'image-generation'。dialect 默认为 OpenAI，支持 'openai' 或 'anthropic'。"
     sensitive: false

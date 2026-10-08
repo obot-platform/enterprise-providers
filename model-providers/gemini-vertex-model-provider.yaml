@@ -5,18 +5,58 @@ validateArgs:
 icon: "/admin/assets/gemini_icon.svg"
 iconDark: "/admin/assets/gemini_icon.svg"
 description: "Model provider for Google Gemini Vertex AI"
+locales:
+  ja:
+    name: "Google Gemini Vertex AI モデルプロバイダー"
+    description: "Google Gemini Vertex AI のモデルプロバイダー"
+  ko:
+    name: "Google Gemini Vertex AI 모델 공급자"
+    description: "Google Gemini Vertex AI 모델 공급자"
+  zh-CN:
+    name: "Google Gemini Vertex AI 模型提供方"
+    description: "Google Gemini Vertex AI 模型提供方"
 link: "https://cloud.google.com/vertex-ai"
 requiredConfigurationParameters:
   - name: "OBOT_GEMINI_VERTEX_MODEL_PROVIDER_GOOGLE_CREDENTIALS_JSON"
     friendlyName: "Google Credentials JSON"
     description: "Google Cloud Account Credentials - JSON File Contents: https://cloud.google.com/iam/docs/keys-create-delete#creating"
+    locales:
+      ja:
+        friendlyName: "Google 認証情報 JSON"
+        description: "Google Cloud アカウントの認証情報（JSON ファイルの内容）: https://cloud.google.com/iam/docs/keys-create-delete#creating"
+      ko:
+        friendlyName: "Google 사용자 인증 정보 JSON"
+        description: "Google Cloud 계정 인증 정보(JSON 파일 내용): https://cloud.google.com/iam/docs/keys-create-delete#creating"
+      zh-CN:
+        friendlyName: "Google 凭据 JSON"
+        description: "Google Cloud 账户凭据（JSON 文件内容）：https://cloud.google.com/iam/docs/keys-create-delete#creating"
     sensitive: true
 optionalConfigurationParameters:
   - name: "OBOT_GEMINI_VERTEX_MODEL_PROVIDER_GOOGLE_CLOUD_PROJECT"
     friendlyName: "Project ID"
     description: "Google Cloud Project ID"
+    locales:
+      ja:
+        friendlyName: "プロジェクト ID"
+        description: "Google Cloud プロジェクト ID"
+      ko:
+        friendlyName: "프로젝트 ID"
+        description: "Google Cloud 프로젝트 ID"
+      zh-CN:
+        friendlyName: "项目 ID"
+        description: "Google Cloud 项目 ID"
     sensitive: false
   - name: "OBOT_GEMINI_VERTEX_MODEL_PROVIDER_GOOGLE_CLOUD_LOCATION"
     friendlyName: "Location"
     description: "Google Cloud Location"
+    locales:
+      ja:
+        friendlyName: "ロケーション"
+        description: "Google Cloud ロケーション"
+      ko:
+        friendlyName: "위치"
+        description: "Google Cloud 위치"
+      zh-CN:
+        friendlyName: "位置"
+        description: "Google Cloud 位置"
     sensitive: false

@@ -5,33 +5,113 @@ validateArgs:
 icon: "/admin/assets/azure_openai_icon.svg"
 iconDark: "/admin/assets/azure_openai_icon.svg"
 description: "Model provider for Azure OpenAI/Foundry models using Entra ID service principal authentication"
+locales:
+  ja:
+    name: "Azure（Entra ID）"
+    description: "Entra ID サービスプリンシパル認証を使用する Azure OpenAI/Foundry モデルのプロバイダー"
+  ko:
+    name: "Azure(Entra ID)"
+    description: "Entra ID 서비스 주체 인증을 사용하는 Azure OpenAI/Foundry 모델 공급자"
+  zh-CN:
+    name: "Azure（Entra ID）"
+    description: "使用 Entra ID 服务主体身份验证的 Azure OpenAI/Foundry 模型提供方"
 link: "https://azure.microsoft.com/en-us/products/ai-services/openai-service"
 requiredConfigurationParameters:
   - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_ENDPOINT"
     friendlyName: "Azure Endpoint"
     description: "Azure service endpoint URL (e.g. https://my-resource.cognitiveservices.azure.com/ or https://my-resource.openai.azure.com/)"
+    locales:
+      ja:
+        friendlyName: "Azure エンドポイント"
+        description: "Azure サービスのエンドポイント URL（例: https://my-resource.cognitiveservices.azure.com/ または https://my-resource.openai.azure.com/）。"
+      ko:
+        friendlyName: "Azure 엔드포인트"
+        description: "Azure 서비스 엔드포인트 URL입니다(예: https://my-resource.cognitiveservices.azure.com/ 또는 https://my-resource.openai.azure.com/)."
+      zh-CN:
+        friendlyName: "Azure 端点"
+        description: "Azure 服务端点 URL（例如 https://my-resource.cognitiveservices.azure.com/ 或 https://my-resource.openai.azure.com/）。"
     sensitive: false
   - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_CLIENT_ID"
     friendlyName: "Client ID"
     description: "Azure Entra ID application (client) ID"
+    locales:
+      ja:
+        friendlyName: "クライアント ID"
+        description: "Azure Entra ID アプリケーション（クライアント）ID"
+      ko:
+        friendlyName: "클라이언트 ID"
+        description: "Azure Entra ID 애플리케이션(클라이언트) ID"
+      zh-CN:
+        friendlyName: "客户端 ID"
+        description: "Azure Entra ID 应用（客户端）ID"
     sensitive: false
   - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_CLIENT_SECRET"
     friendlyName: "Client Secret"
     description: "Azure Entra ID client secret"
+    locales:
+      ja:
+        friendlyName: "クライアントシークレット"
+        description: "Azure Entra ID クライアントシークレット"
+      ko:
+        friendlyName: "클라이언트 보안 비밀"
+        description: "Azure Entra ID 클라이언트 보안 비밀"
+      zh-CN:
+        friendlyName: "客户端密钥"
+        description: "Azure Entra ID 客户端密钥"
     sensitive: true
   - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_TENANT_ID"
     friendlyName: "Tenant ID"
     description: "Azure Entra ID tenant ID"
+    locales:
+      ja:
+        friendlyName: "テナント ID"
+        description: "Azure Entra ID テナント ID"
+      ko:
+        friendlyName: "테넌트 ID"
+        description: "Azure Entra ID 테넌트 ID"
+      zh-CN:
+        friendlyName: "租户 ID"
+        description: "Azure Entra ID 租户 ID"
     sensitive: false
   - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_SUBSCRIPTION_ID"
     friendlyName: "Subscription ID"
     description: "Azure subscription ID"
+    locales:
+      ja:
+        friendlyName: "サブスクリプション ID"
+        description: "Azure サブスクリプション ID"
+      ko:
+        friendlyName: "구독 ID"
+        description: "Azure 구독 ID"
+      zh-CN:
+        friendlyName: "订阅 ID"
+        description: "Azure 订阅 ID"
     sensitive: false
   - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_RESOURCE_GROUP"
     friendlyName: "Resource Group"
     description: "Azure resource group containing the Cognitive Services account"
+    locales:
+      ja:
+        friendlyName: "リソースグループ"
+        description: "Cognitive Services アカウントを含む Azure リソースグループ"
+      ko:
+        friendlyName: "리소스 그룹"
+        description: "Cognitive Services 계정을 포함하는 Azure 리소스 그룹"
+      zh-CN:
+        friendlyName: "资源组"
+        description: "包含 Cognitive Services 账户的 Azure 资源组"
     sensitive: false
   - name: "OBOT_AZURE_ENTRA_MODEL_PROVIDER_RESOURCE_NAME"
     friendlyName: "Resource Name"
     description: "Azure Cognitive Services resource name"
+    locales:
+      ja:
+        friendlyName: "リソース名"
+        description: "Azure Cognitive Services のリソース名"
+      ko:
+        friendlyName: "리소스 이름"
+        description: "Azure Cognitive Services 리소스 이름"
+      zh-CN:
+        friendlyName: "资源名称"
+        description: "Azure Cognitive Services 资源名称"
     sensitive: false

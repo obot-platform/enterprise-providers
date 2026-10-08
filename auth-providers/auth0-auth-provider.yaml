@@ -2,6 +2,16 @@ name: "Auth0"
 command: "auth0-auth-provider/bin/obot-provider"
 icon: "https://cdn.jsdelivr.net/npm/simple-icons@v13/icons/auth0.svg"
 description: "Auth provider for Auth0"
+locales:
+  ja:
+    name: "Auth0"
+    description: "Auth0 の認証プロバイダー"
+  ko:
+    name: "Auth0"
+    description: "Auth0 인증 공급자"
+  zh-CN:
+    name: "Auth0"
+    description: "Auth0 身份验证提供方"
 link: "https://auth0.com/"
 requiredEntitlements:
   - "OBOT_ENTERPRISE_AUTH_PROVIDERS"
@@ -9,60 +19,190 @@ requiredConfigurationParameters:
   - name: "OBOT_AUTH0_AUTH_PROVIDER_CLIENT_ID"
     friendlyName: "Client ID"
     description: "Client ID for your Auth0 application. Can be found in Auth0 Dashboard > Applications > Settings"
+    locales:
+      ja:
+        friendlyName: "クライアント ID"
+        description: "Auth0 アプリケーションのクライアント ID。Auth0 Dashboard > Applications > Settings で確認できます。"
+      ko:
+        friendlyName: "클라이언트 ID"
+        description: "Auth0 애플리케이션의 클라이언트 ID입니다. Auth0 Dashboard > Applications > Settings에서 확인할 수 있습니다."
+      zh-CN:
+        friendlyName: "客户端 ID"
+        description: "Auth0 应用的客户端 ID。可在 Auth0 Dashboard > Applications > Settings 中找到。"
     sensitive: false
   - name: "OBOT_AUTH0_AUTH_PROVIDER_CLIENT_SECRET"
     friendlyName: "Client Secret"
     description: "Client secret for your Auth0 application. Can be found in Auth0 Dashboard > Applications > Settings"
+    locales:
+      ja:
+        friendlyName: "クライアントシークレット"
+        description: "Auth0 アプリケーションのクライアントシークレット。Auth0 Dashboard > Applications > Settings で確認できます。"
+      ko:
+        friendlyName: "클라이언트 보안 비밀"
+        description: "Auth0 애플리케이션의 클라이언트 보안 비밀입니다. Auth0 Dashboard > Applications > Settings에서 확인할 수 있습니다."
+      zh-CN:
+        friendlyName: "客户端密钥"
+        description: "Auth0 应用的客户端密钥。可在 Auth0 Dashboard > Applications > Settings 中找到。"
     sensitive: true
   - name: "OBOT_AUTH0_AUTH_PROVIDER_DOMAIN"
     friendlyName: "Auth0 Domain"
     description: "Your Auth0 domain (e.g. your-tenant.us.auth0.com). Can be found in Auth0 Dashboard > Applications > Settings"
+    locales:
+      ja:
+        friendlyName: "Auth0 ドメイン"
+        description: "Auth0 ドメイン（例: your-tenant.us.auth0.com）。Auth0 Dashboard > Applications > Settings で確認できます。"
+      ko:
+        friendlyName: "Auth0 도메인"
+        description: "Auth0 도메인입니다(예: your-tenant.us.auth0.com). Auth0 Dashboard > Applications > Settings에서 확인할 수 있습니다."
+      zh-CN:
+        friendlyName: "Auth0 域名"
+        description: "Auth0 域名（例如 your-tenant.us.auth0.com）。可在 Auth0 Dashboard > Applications > Settings 中找到。"
     sensitive: false
   - name: "OBOT_AUTH0_AUTH_PROVIDER_MGMT_CLIENT_ID"
     friendlyName: "Management API Client ID"
     description: "Client ID for a Machine-to-Machine application authorized for the Auth0 Management API. Create one in Auth0 Dashboard > Applications."
+    locales:
+      ja:
+        friendlyName: "Management API クライアント ID"
+        description: "Auth0 Management API の利用を許可された Machine-to-Machine アプリケーションのクライアント ID。Auth0 Dashboard > Applications で作成します。"
+      ko:
+        friendlyName: "Management API 클라이언트 ID"
+        description: "Auth0 Management API 사용 권한이 있는 Machine-to-Machine 앱의 클라이언트 ID입니다. Auth0 Dashboard > Applications에서 만드세요."
+      zh-CN:
+        friendlyName: "Management API 客户端 ID"
+        description: "获准使用 Auth0 Management API 的 Machine-to-Machine 应用的客户端 ID。请在 Auth0 Dashboard > Applications 中创建。"
     sensitive: false
   - name: "OBOT_AUTH0_AUTH_PROVIDER_MGMT_CLIENT_SECRET"
     friendlyName: "Management API Client Secret"
     description: "Client secret for the Management API Machine-to-Machine application."
+    locales:
+      ja:
+        friendlyName: "Management API クライアントシークレット"
+        description: "Management API 用 Machine-to-Machine アプリケーションのクライアントシークレット。"
+      ko:
+        friendlyName: "Management API 클라이언트 보안 비밀"
+        description: "Management API용 Machine-to-Machine 앱의 클라이언트 보안 비밀입니다."
+      zh-CN:
+        friendlyName: "Management API 客户端密钥"
+        description: "Management API 的 Machine-to-Machine 应用的客户端密钥。"
     sensitive: true
   - name: "OBOT_AUTH_PROVIDER_COOKIE_SECRET"
     friendlyName: "Cookie Secret"
     description: "Secret used to encrypt cookies. Must be a random string of length 16, 24, or 32."
+    locales:
+      ja:
+        friendlyName: "Cookie シークレット"
+        description: "Cookie の暗号化に使用するシークレット。長さが 16、24、または 32 文字のランダムな文字列にしてください。"
+      ko:
+        friendlyName: "쿠키 보안 비밀"
+        description: "쿠키 암호화에 사용하는 보안 비밀입니다. 길이가 16, 24 또는 32인 임의 문자열이어야 합니다."
+      zh-CN:
+        friendlyName: "Cookie 密钥"
+        description: "用于加密 Cookie 的密钥。必须是长度为 16、24 或 32 的随机字符串。"
     sensitive: true
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_EMAIL_DOMAINS"
     friendlyName: "Allowed E-Mail Domains"
     description: "A list of email domains that are allowed to authenticate with this provider. * is a special value that allows all domains."
+    locales:
+      ja:
+        friendlyName: "許可するメールドメイン"
+        description: "このプロバイダーで認証を許可するメールドメインの一覧です。* を指定するとすべてのドメインを許可します。"
+      ko:
+        friendlyName: "허용할 이메일 도메인"
+        description: "이 공급자로 인증할 수 있는 이메일 도메인 목록입니다. *를 지정하면 모든 도메인을 허용합니다."
+      zh-CN:
+        friendlyName: "允许的电子邮件域名"
+        description: "允许通过此提供方进行身份验证的电子邮件域名列表。* 表示允许所有域名。"
     sensitive: false
 optionalConfigurationParameters:
   - name: "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN"
     friendlyName: "PostgreSQL connection string (DSN)"
     description: "The connection string for a PostgreSQL database to use for session storage. If unset, cookies will be used for session storage instead."
+    locales:
+      ja:
+        friendlyName: "PostgreSQL 接続文字列 (DSN)"
+        description: "セッション保存に使用する PostgreSQL データベースの接続文字列です。未設定の場合は Cookie にセッションを保存します。"
+      ko:
+        friendlyName: "PostgreSQL 연결 문자열(DSN)"
+        description: "세션 저장에 사용할 PostgreSQL 데이터베이스 연결 문자열입니다. 설정하지 않으면 쿠키에 세션을 저장합니다."
+      zh-CN:
+        friendlyName: "PostgreSQL 连接字符串 (DSN)"
+        description: "用于存储会话的 PostgreSQL 数据库连接字符串。未设置时改用 Cookie 存储会话。"
     sensitive: true
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_POSTGRES_MAX_CONNECTIONS"
     friendlyName: "PostgreSQL max open connections"
     description: "The maximum number of open connections to the PostgreSQL database."
+    locales:
+      ja:
+        friendlyName: "PostgreSQL 最大オープン接続数"
+        description: "PostgreSQL データベースへの最大オープン接続数です。"
+      ko:
+        friendlyName: "PostgreSQL 최대 열린 연결 수"
+        description: "PostgreSQL 데이터베이스의 최대 열린 연결 수입니다."
+      zh-CN:
+        friendlyName: "PostgreSQL 最大打开连接数"
+        description: "PostgreSQL 数据库允许的最大打开连接数。"
     sensitive: false
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_POSTGRES_MAX_IDLE_CONNECTIONS"
     friendlyName: "PostgreSQL max idle connections"
     description: "The maximum number of idle connections to the PostgreSQL database."
+    locales:
+      ja:
+        friendlyName: "PostgreSQL 最大アイドル接続数"
+        description: "PostgreSQL データベースへの最大アイドル接続数です。"
+      ko:
+        friendlyName: "PostgreSQL 최대 유휴 연결 수"
+        description: "PostgreSQL 데이터베이스의 최대 유휴 연결 수입니다."
+      zh-CN:
+        friendlyName: "PostgreSQL 最大空闲连接数"
+        description: "PostgreSQL 数据库允许的最大空闲连接数。"
     sensitive: false
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_LIFETIME_SECONDS"
     friendlyName: "PostgreSQL connection lifetime"
     description: "The maximum lifetime of a PostgreSQL database connection, in seconds."
+    locales:
+      ja:
+        friendlyName: "PostgreSQL 接続の有効期間"
+        description: "PostgreSQL データベース接続の最大有効期間（秒）。"
+      ko:
+        friendlyName: "PostgreSQL 연결 수명"
+        description: "PostgreSQL 데이터베이스 연결의 최대 수명(초)입니다."
+      zh-CN:
+        friendlyName: "PostgreSQL 连接生存时间"
+        description: "PostgreSQL 数据库连接的最长生存时间，以秒为单位。"
     sensitive: false
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"
     friendlyName: "Token Refresh Duration"
     description: "Time to wait before attempting to refresh auth tokens. Should be in a format like 1h1m1s. Default: 1h"
+    locales:
+      ja:
+        friendlyName: "トークン更新間隔"
+        description: "認証トークンの更新を試みるまでの待機時間です。1h1m1s のような形式で指定します。既定値: 1h"
+      ko:
+        friendlyName: "토큰 갱신 간격"
+        description: "인증 토큰 갱신을 시도하기 전 대기 시간입니다. 1h1m1s와 같은 형식으로 지정합니다. 기본값: 1h"
+      zh-CN:
+        friendlyName: "令牌刷新间隔"
+        description: "尝试刷新身份验证令牌前的等待时间。格式如 1h1m1s。默认值：1h"
     sensitive: false
   - name: "OBOT_AUTH0_AUTH_PROVIDER_INSECURE_ALLOW_UNVERIFIED_EMAIL"
     friendlyName: "Allow Unverified Emails"
     description: "Allow logins where the IdP does not assert email_verified=true. This weakens account/email-domain validation. Only enable if your Auth0 tenant requires it. Default: false"
+    locales:
+      ja:
+        friendlyName: "未確認のメールアドレスを許可"
+        description: "IdP が email_verified=true を示さない場合もログインを許可します。アカウントとメールドメインの検証が弱くなります。Auth0 テナントで必要な場合のみ有効にしてください。既定値: false"
+      ko:
+        friendlyName: "확인되지 않은 이메일 허용"
+        description: "IdP가 email_verified=true를 표시하지 않아도 로그인을 허용합니다. 계정 및 이메일 도메인 검증이 약해집니다. Auth0 테넌트에 필요한 경우에만 활성화하세요. 기본값: false"
+      zh-CN:
+        friendlyName: "允许未验证的电子邮件"
+        description: "即使身份提供方未声明 email_verified=true，也允许登录。这会削弱账户和电子邮件域名验证。仅当 Auth0 租户需要时启用。默认值：false"
     sensitive: false
     hidden: true
 postgresTablePrefix: "auth0_"

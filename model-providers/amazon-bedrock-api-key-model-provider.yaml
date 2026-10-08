@@ -4,14 +4,44 @@ validateArgs:
   - validate
 icon: "/admin/assets/amazon-bedrock.png"
 description: "Model provider for Amazon Bedrock models using API key authentication"
+locales:
+  ja:
+    name: "Amazon Bedrock（API キー）"
+    description: "API キー認証を使用する Amazon Bedrock モデルのプロバイダー"
+  ko:
+    name: "Amazon Bedrock(API 키)"
+    description: "API 키 인증을 사용하는 Amazon Bedrock 모델 공급자"
+  zh-CN:
+    name: "Amazon Bedrock（API 密钥）"
+    description: "使用 API 密钥身份验证的 Amazon Bedrock 模型提供方"
 link: "https://aws.amazon.com/bedrock/"
 requiredConfigurationParameters:
   - name: "OBOT_AMAZON_BEDROCK_API_KEY_MODEL_PROVIDER_API_KEY"
     friendlyName: "API Key"
     description: "Amazon Bedrock API Key"
+    locales:
+      ja:
+        friendlyName: "API キー"
+        description: "Amazon Bedrock API キー"
+      ko:
+        friendlyName: "API 키"
+        description: "Amazon Bedrock API 키"
+      zh-CN:
+        friendlyName: "API 密钥"
+        description: "Amazon Bedrock API 密钥"
     sensitive: true
 optionalConfigurationParameters:
   - name: "OBOT_AMAZON_BEDROCK_API_KEY_MODEL_PROVIDER_REGION"
     friendlyName: "AWS Region"
     description: "AWS Region for Amazon Bedrock (defaults to us-east-1)"
+    locales:
+      ja:
+        friendlyName: "AWS リージョン"
+        description: "Amazon Bedrock の AWS リージョン（既定値: us-east-1）。"
+      ko:
+        friendlyName: "AWS 리전"
+        description: "Amazon Bedrock의 AWS 리전입니다(기본값: us-east-1)."
+      zh-CN:
+        friendlyName: "AWS 区域"
+        description: "Amazon Bedrock 使用的 AWS 区域（默认值：us-east-1）。"
     sensitive: false
