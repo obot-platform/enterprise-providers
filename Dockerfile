@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM --platform=$BUILDPLATFORM cgr.dev/chainguard/wolfi-base AS base
 
-RUN apk upgrade --no-cache && apk add --no-cache bash go make git ca-certificates upx
+RUN apk upgrade --no-cache && apk add --no-cache bash go-1.27 make git ca-certificates upx
 
 FROM base AS build
 WORKDIR /obot-providers/enterprise-providers
