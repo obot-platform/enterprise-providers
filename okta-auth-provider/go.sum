@@ -126,8 +126,8 @@ github.com/oauth2-proxy/mockoidc v0.0.0-20240214162133-caebfff84d25 h1:9bCMuD3Tc
 github.com/oauth2-proxy/mockoidc v0.0.0-20240214162133-caebfff84d25/go.mod h1:eDjgYHYDJbPLBLsyZ6qRaugP0mX8vePOhZ5id1fdzJw=
 github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20260718004156-5704f042a6ff h1:bZeGPbNn7O5vnhRv9PQ6vNgInvEJSP1iyVVQyLWJl00=
 github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20260718004156-5704f042a6ff/go.mod h1:Fzn9iO2soLotFAHmSgVA9wMcnnKw4dew+FbZucQsHZ4=
-github.com/obot-platform/providers/auth-providers-common v0.0.0-20260717172559-9ab827189ee6 h1:KiwO44/S3FPLI10hZ7VX5Rq8R4iMPEQv74bubihWCd0=
-github.com/obot-platform/providers/auth-providers-common v0.0.0-20260717172559-9ab827189ee6/go.mod h1:bpOffocRUeoZKKGF82koSwVUMoASoyZVzksxaiArrK4=
+github.com/obot-platform/providers/auth-providers-common v0.0.0-20261009133010-06ec700f9187 h1:3fDxzijxA/A3RQpTiiMATS1kix52p4KN+lHlbRMalZc=
+github.com/obot-platform/providers/auth-providers-common v0.0.0-20261009133010-06ec700f9187/go.mod h1:t4420AmaG8lDLWvMH9y3/heVx3OK20dbLiw0MqPF+ao=
 github.com/okta/okta-sdk-golang/v5 v5.0.6 h1:p7ptDMB1KxQ/7xSh+6FhMSybwl+ubTV4f1oL4N0Bu6U=
 github.com/okta/okta-sdk-golang/v5 v5.0.6/go.mod h1:T/vmECtJX33YPZSVD+sorebd8LLhe38Bi/VrFTjgVX0=
 github.com/onsi/ginkgo/v2 v2.28.1 h1:S4hj+HbZp40fNKuLUQOYLDgZLwNUVn19N3Atb98NCyI=
