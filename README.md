@@ -21,3 +21,20 @@ docker build --build-arg COMPRESS_BINARIES=false -t enterprise-providers:uncompr
 
 The Docker build cross-compiles for its target platform, including `linux/amd64`
 and `linux/arm64`, without running target binaries during the build.
+
+## Provider display text
+
+Provider YAML keeps English in `name`, `description`, and each configuration
+parameter's `friendlyName` and `description`. Add `locales` beside those
+fields for `ja`, `ko`, and `zh-CN`:
+
+```yaml
+locales:
+  ja:
+    name: "表示名"
+    description: "説明"
+```
+
+For a configuration parameter, use `friendlyName` and `description` under each
+locale instead of `name` and `description`. Obot selects the display text from
+`Accept-Language` and uses the English field when a translation is absent.

@@ -4,22 +4,72 @@ validateArgs:
   - validate
 icon: "/admin/assets/amazon-bedrock.png"
 description: "Model provider for Amazon Bedrock models"
+locales:
+  ja:
+    name: "Amazon Bedrock（静的認証情報）"
+    description: "Amazon Bedrock モデルのプロバイダー"
+  ko:
+    name: "Amazon Bedrock(정적 자격 증명)"
+    description: "Amazon Bedrock 모델 공급자"
+  zh-CN:
+    name: "Amazon Bedrock（静态凭据）"
+    description: "Amazon Bedrock 模型提供方"
 link: "https://aws.amazon.com/bedrock/"
 requiredConfigurationParameters:
   - name: "OBOT_AMAZON_BEDROCK_MODEL_PROVIDER_ACCESS_KEY_ID"
     friendlyName: "AWS Access Key ID"
     description: "AWS Access Key ID"
+    locales:
+      ja:
+        friendlyName: "AWS アクセスキー ID"
+        description: "AWS アクセスキー ID"
+      ko:
+        friendlyName: "AWS 액세스 키 ID"
+        description: "AWS 액세스 키 ID"
+      zh-CN:
+        friendlyName: "AWS 访问密钥 ID"
+        description: "AWS 访问密钥 ID"
     sensitive: true
   - name: "OBOT_AMAZON_BEDROCK_MODEL_PROVIDER_SECRET_ACCESS_KEY"
     friendlyName: "AWS Secret Access Key"
     description: "AWS Secret Access Key"
+    locales:
+      ja:
+        friendlyName: "AWS シークレットアクセスキー"
+        description: "AWS シークレットアクセスキー"
+      ko:
+        friendlyName: "AWS 보안 액세스 키"
+        description: "AWS 보안 액세스 키"
+      zh-CN:
+        friendlyName: "AWS 秘密访问密钥"
+        description: "AWS 秘密访问密钥"
     sensitive: true
 optionalConfigurationParameters:
   - name: "OBOT_AMAZON_BEDROCK_MODEL_PROVIDER_SESSION_TOKEN"
     friendlyName: "AWS Session Token"
     description: "AWS Session Token for temporary credentials"
+    locales:
+      ja:
+        friendlyName: "AWS セッショントークン"
+        description: "一時的な認証情報に使用する AWS セッショントークン"
+      ko:
+        friendlyName: "AWS 세션 토큰"
+        description: "임시 자격 증명에 사용할 AWS 세션 토큰"
+      zh-CN:
+        friendlyName: "AWS 会话令牌"
+        description: "用于临时凭据的 AWS 会话令牌"
     sensitive: true
   - name: "OBOT_AMAZON_BEDROCK_MODEL_PROVIDER_REGION"
     friendlyName: "AWS Region"
     description: "AWS Region for Amazon Bedrock, defaults to us-east-1"
+    locales:
+      ja:
+        friendlyName: "AWS リージョン"
+        description: "Amazon Bedrock の AWS リージョン。既定値: us-east-1"
+      ko:
+        friendlyName: "AWS 리전"
+        description: "Amazon Bedrock의 AWS 리전입니다. 기본값: us-east-1"
+      zh-CN:
+        friendlyName: "AWS 区域"
+        description: "Amazon Bedrock 的 AWS 区域。默认值：us-east-1"
     sensitive: false
