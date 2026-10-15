@@ -18,17 +18,28 @@ import (
 )
 
 const (
+	// ProviderKind names this provider to authcommon, which bakes it into the group-list cursors it mints.
+	ProviderKind = "onelogin"
+
 	// GroupIDPrefix starts the ID of every group this provider returns. The rest is the OneLogin role ID.
-	GroupIDPrefix = "onelogin/"
+	GroupIDPrefix = ProviderKind + "/"
 
 	rolesPath = "/api/2/roles"
 	usersPath = "/api/2/users"
+
+	// roleListFields trims a role listing to what Obot uses. By default OneLogin lists every role with the IDs of all
+	// its users, admins, and apps, which in a large account can make one page of roles many megabytes. The cursor
+	// keeps fields, so later pages are trimmed too. GET /api/2/roles/:id rejects fields with a 400.
+	roleListFields = "id,name"
 
 	// userStatusActive is the status of a OneLogin user who can sign in.
 	userStatusActive = 1
 
 	// roleLookupConcurrency caps the concurrent role-name lookups for one user.
 	roleLookupConcurrency = 8
+
+	// maxUserInfoBytes caps how much of a userinfo response is read. A real one is a few hundred bytes.
+	maxUserInfoBytes = 1 << 20
 )
 
 var (
@@ -79,10 +90,10 @@ type UserInfo struct {
 	IconURL string `json:"icon_url,omitempty"`
 }
 
-// GetUserInfo returns the authenticated user's ID and name from the OneLogin userinfo endpoint, <issuer>/me.
-// The ID is the OIDC subject, which is the user's numeric OneLogin user ID.
+// GetUserInfo returns the authenticated user's ID and name from the OneLogin userinfo endpoint, <issuer>/me, which it
+// calls through httpClient. The ID is the OIDC subject, which is the user's numeric OneLogin user ID.
 // OneLogin does not support user profile photos, so IconURL is always empty.
-func GetUserInfo(ctx context.Context, accessToken, issuerURL string) (*UserInfo, error) {
+func GetUserInfo(ctx context.Context, httpClient *http.Client, accessToken, issuerURL string) (*UserInfo, error) {
 	userInfoURL := strings.TrimSuffix(issuerURL, "/") + "/me"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userInfoURL, nil)
@@ -93,19 +104,24 @@ func GetUserInfo(ctx context.Context, accessToken, issuerURL string) (*UserInfo,
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call userinfo endpoint: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	// Read one byte past the cap, to tell a response at the cap from one beyond it.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUserInfoBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("userinfo endpoint returned status %d: %s", resp.StatusCode, string(body))
+		// The error ends up in the response to Obot, so only the start of the body goes in it.
+		return nil, fmt.Errorf("userinfo endpoint returned status %d: %s", resp.StatusCode, string(body[:min(len(body), client.MaxErrorBodyBytes)]))
+	}
+	if len(body) > maxUserInfoBytes {
+		return nil, fmt.Errorf("userinfo response is larger than %d bytes", maxUserInfoBytes)
 	}
 
 	var userInfo struct {
@@ -137,7 +153,9 @@ func FetchGroupPage(ctx context.Context, apiClient *client.Client, req authcommo
 	if req.Cursor != "" {
 		query.Set("cursor", req.Cursor)
 	} else {
-		query.Set("limit", strconv.Itoa(min(max(req.Limit, 1), authcommon.MaxGroupPageSize)))
+		// authcommon.ParseGroupPageRequest has already put the limit between 1 and authcommon.MaxGroupPageSize.
+		query.Set("limit", strconv.Itoa(req.Limit))
+		query.Set("fields", roleListFields)
 		if req.NameFilter != "" {
 			query.Set("name", req.NameFilter)
 		}

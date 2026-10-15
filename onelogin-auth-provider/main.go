@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -60,6 +61,14 @@ const (
 	// with error=access_denied, for a user who has not been given access to the OIDC app. It is a fixed message
 	// rather than OneLogin's error_description, because the callback's query string can be crafted by anyone.
 	accessDeniedMessage = "Login Failed: OneLogin denied access. Your OneLogin account may not have access to this application. Ask your OneLogin administrator to give you access."
+
+	// maxUserIDBodyBytes caps the body of POST /obot-list-user-auth-groups, which is one OneLogin user ID of at most
+	// 18 digits, with room for surrounding whitespace.
+	maxUserIDBodyBytes = 64
+
+	// maxLoggedErrorDescriptionBytes caps how much of a callback's error_description is logged. Anyone can craft the
+	// callback's query string, so it is not let fill the log.
+	maxLoggedErrorDescriptionBytes = 256
 )
 
 type server struct {
@@ -68,6 +77,8 @@ type server struct {
 	// roles names OneLogin roles for the directory endpoints. It is nil when apiClient is.
 	roles     *profile.RoleCache
 	issuerURL string
+	// httpClient calls OneLogin's userinfo endpoint.
+	httpClient *http.Client
 }
 
 // callbackProxy is the part of the oauth2-proxy that oauthCallback uses.
@@ -102,6 +113,83 @@ func main() {
 		os.Exit(1)
 	}
 
+	oauthProxyOpts, err := newOAuthProxyOptions(opts, refreshDuration, cookieSecret)
+	if err != nil {
+		fmt.Printf("ERROR: onelogin-auth-provider: %v\n", err)
+		os.Exit(1)
+	}
+
+	oauthProxy, err := oauth2proxy.NewOAuthProxy(oauthProxyOpts, oauth2proxy.NewValidator(oauthProxyOpts.EmailDomains, oauthProxyOpts.AuthenticatedEmailsFile))
+	if err != nil {
+		fmt.Printf("ERROR: onelogin-auth-provider: failed to create oauth2 proxy: %v\n", err)
+		os.Exit(1)
+	}
+
+	hasAPICredentials, err := apiCredentialsConfigured(opts.APIClientID, opts.APIClientSecret)
+	if err != nil {
+		fmt.Printf("ERROR: onelogin-auth-provider: invalid API credentials: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Only the directory endpoints call the OneLogin admin API. Without API credentials the client stays nil, and
+	// those endpoints answer 503.
+	var (
+		httpClient = client.NewHTTPClient()
+		apiClient  *client.Client
+		roles      *profile.RoleCache
+	)
+	if hasAPICredentials {
+		baseURL, err := apiBaseURL(opts.IssuerURL, opts.APIBaseURL)
+		if err != nil {
+			fmt.Printf("ERROR: onelogin-auth-provider: invalid API base URL: %v\n", err)
+			os.Exit(1)
+		}
+		apiClient = client.New(baseURL, strings.TrimSpace(opts.APIClientID), strings.TrimSpace(opts.APIClientSecret), client.WithHTTPClient(httpClient))
+
+		// The role-name cache lives as long as the process. Until its first fill completes, each role it is asked
+		// about is looked up on its own.
+		roles = profile.NewRoleCache(apiClient)
+		go roles.Run(context.Background(), profile.RoleCacheRefreshInterval)
+	}
+
+	srv := &server{
+		apiClient:  apiClient,
+		roles:      roles,
+		issuerURL:  opts.IssuerURL,
+		httpClient: httpClient,
+	}
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "9999"
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		// / (exactly): Obot's readiness probe. Obot polls it until it gets a 200 and ignores the body,
+		// which is the provider's local base URL by convention.
+		_, _ = w.Write(fmt.Appendf(nil, "http://127.0.0.1:%s", port))
+	})
+	mux.HandleFunc("/obot-get-state", state.ObotGetState(oauthProxy))
+	mux.HandleFunc("/obot-get-user-info", srv.getUserInfo)
+	srv.registerDirectoryRoutes(mux)
+	mux.HandleFunc("/oauth2/callback", oauthCallback(oauthProxy))
+	mux.HandleFunc("/", oauthProxy.ServeHTTP)
+
+	listenHost := os.Getenv("OBOT_PROVIDER_LISTEN_HOST")
+	if listenHost == "" {
+		listenHost = "127.0.0.1"
+	}
+
+	addr := listenHost + ":" + port
+	if err := http.ListenAndServe(addr, mux); !errors.Is(err, http.ErrServerClosed) {
+		fmt.Printf("ERROR: onelogin-auth-provider: failed to listen and serve: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// newOAuthProxyOptions returns the oauth2-proxy options for signing in through OneLogin's OIDC app, validated.
+func newOAuthProxyOptions(opts Options, refreshDuration time.Duration, cookieSecret []byte) (*options.Options, error) {
 	legacyOpts := options.NewLegacyOptions()
 	legacyOpts.LegacyProvider.ProviderType = "oidc"
 	legacyOpts.LegacyProvider.ProviderName = "oidc"
@@ -115,8 +203,7 @@ func main() {
 
 	oauthProxyOpts, err := legacyOpts.ToOptions()
 	if err != nil {
-		fmt.Printf("ERROR: onelogin-auth-provider: failed to convert legacy options to new options: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("failed to convert legacy options to new options: %w", err)
 	}
 
 	oauthProxyOpts.Server.BindAddress = ""
@@ -146,74 +233,11 @@ func main() {
 	oauthProxyOpts.Logging.AuthEnabled = loggingEnabled
 	oauthProxyOpts.Logging.StandardEnabled = loggingEnabled
 
-	if err = validation.Validate(oauthProxyOpts); err != nil {
-		fmt.Printf("ERROR: onelogin-auth-provider: failed to validate options: %v\n", err)
-		os.Exit(1)
+	if err := validation.Validate(oauthProxyOpts); err != nil {
+		return nil, fmt.Errorf("failed to validate options: %w", err)
 	}
 
-	oauthProxy, err := oauth2proxy.NewOAuthProxy(oauthProxyOpts, oauth2proxy.NewValidator(oauthProxyOpts.EmailDomains, oauthProxyOpts.AuthenticatedEmailsFile))
-	if err != nil {
-		fmt.Printf("ERROR: onelogin-auth-provider: failed to create oauth2 proxy: %v\n", err)
-		os.Exit(1)
-	}
-
-	hasAPICredentials, err := apiCredentialsConfigured(opts.APIClientID, opts.APIClientSecret)
-	if err != nil {
-		fmt.Printf("ERROR: onelogin-auth-provider: invalid API credentials: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Only the directory endpoints call the OneLogin admin API. Without API credentials the client stays nil, and
-	// those endpoints answer 503.
-	var (
-		apiClient *client.Client
-		roles     *profile.RoleCache
-	)
-	if hasAPICredentials {
-		baseURL, err := apiBaseURL(opts.IssuerURL, opts.APIBaseURL)
-		if err != nil {
-			fmt.Printf("ERROR: onelogin-auth-provider: invalid API base URL: %v\n", err)
-			os.Exit(1)
-		}
-		apiClient = client.New(baseURL, strings.TrimSpace(opts.APIClientID), strings.TrimSpace(opts.APIClientSecret))
-
-		// The role-name cache lives as long as the process. Until its first fill completes, each role it is asked
-		// about is looked up on its own.
-		roles = profile.NewRoleCache(apiClient)
-		go roles.Run(context.Background(), profile.RoleCacheRefreshInterval)
-	}
-
-	srv := &server{
-		apiClient: apiClient,
-		roles:     roles,
-		issuerURL: opts.IssuerURL,
-	}
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "9999"
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(fmt.Appendf(nil, "http://127.0.0.1:%s", port))
-	})
-	mux.HandleFunc("/obot-get-state", state.ObotGetState(oauthProxy))
-	mux.HandleFunc("/obot-get-user-info", srv.getUserInfo)
-	srv.registerDirectoryRoutes(mux)
-	mux.HandleFunc("/oauth2/callback", oauthCallback(oauthProxy))
-	mux.HandleFunc("/", oauthProxy.ServeHTTP)
-
-	listenHost := os.Getenv("OBOT_PROVIDER_LISTEN_HOST")
-	if listenHost == "" {
-		listenHost = "127.0.0.1"
-	}
-
-	addr := listenHost + ":" + port
-	if err := http.ListenAndServe(addr, mux); !errors.Is(err, http.ErrServerClosed) {
-		fmt.Printf("ERROR: onelogin-auth-provider: failed to listen and serve: %v\n", err)
-		os.Exit(1)
-	}
+	return oauthProxyOpts, nil
 }
 
 // apiCredentialsConfigured reports whether both OneLogin API credentials are configured. Whitespace-only values count
@@ -237,28 +261,75 @@ func apiCredentialsConfigured(clientID, clientSecret string) (bool, error) {
 
 // apiBaseURL returns the base URL of the OneLogin admin API: override when it is set, and otherwise the scheme and
 // host of the issuer URL, which is the account's own domain, such as https://example.onelogin.com.
+//
+// Either way the URL must be https, because the API client sends its credentials there. Plain http is allowed only
+// for a loopback host, which never leaves the machine.
 func apiBaseURL(issuerURL, override string) (string, error) {
 	if override = strings.TrimSpace(override); override != "" {
+		u, err := parseAPIBaseURL(override)
+		if err != nil {
+			return "", fmt.Errorf("OBOT_ONELOGIN_AUTH_PROVIDER_API_BASE_URL: %w", err)
+		}
+		// API paths such as /api/2/roles are appended to the base URL, so a path of its own would double them up.
+		if u.Path != "" && u.Path != "/" {
+			return "", fmt.Errorf("OBOT_ONELOGIN_AUTH_PROVIDER_API_BASE_URL: %q must not have a path; use the scheme and host only, such as https://api.us.onelogin.com", override)
+		}
 		return strings.TrimSuffix(override, "/"), nil
 	}
 
-	u, err := url.Parse(issuerURL)
+	u, err := parseAPIBaseURL(issuerURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse issuer URL %q: %w", issuerURL, err)
-	}
-	if u.Scheme == "" || u.Host == "" {
-		return "", fmt.Errorf("issuer URL %q has no scheme or host", issuerURL)
+		return "", fmt.Errorf("issuer URL: %w", err)
 	}
 
 	return u.Scheme + "://" + u.Host, nil
+}
+
+// parseAPIBaseURL parses a URL the OneLogin admin API is called at, and checks that it is absolute, is https unless
+// its host is a loopback one, and has nothing that would garble the paths appended to it.
+func parseAPIBaseURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse %q: %w", raw, err)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("%q has no host; it must be an absolute URL such as https://example.onelogin.com", raw)
+	}
+
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if !isLoopbackHost(u.Hostname()) {
+			return nil, fmt.Errorf("%q must use https; http is allowed only for a loopback host", raw)
+		}
+	default:
+		return nil, fmt.Errorf("%q must use https", raw)
+	}
+
+	// An empty query or fragment ("…com?" or "…com#") parses to empty strings, so check for the separators too.
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") {
+		return nil, fmt.Errorf("%q must not have user info, a query or a fragment", raw)
+	}
+
+	return u, nil
+}
+
+// isLoopbackHost reports whether host is localhost or a loopback IP address.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // registerDirectoryRoutes registers the endpoints Obot uses to read the OneLogin directory. Every one of them calls
 // the admin API, so when there is no API client each answers 503 instead. They stay registered either way, so a
 // directory request never falls through to the oauth2-proxy handler at /.
 func (s *server) registerDirectoryRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/obot-list-auth-groups", s.requireAPIClient(s.failWhenRateLimited(authcommon.ListGroupsHandler("onelogin", s.fetchGroupPage))))
-	mux.HandleFunc("/obot-get-auth-groups", s.requireAPIClient(authcommon.GetGroupsHandler("onelogin", s.fetchGroupsByIDs)))
+	mux.HandleFunc("/obot-list-auth-groups", s.requireAPIClient(s.failWhenRateLimited(authcommon.ListGroupsHandler(profile.ProviderKind, s.fetchGroupPage))))
+	mux.HandleFunc("/obot-get-auth-groups", s.requireAPIClient(authcommon.GetGroupsHandler(profile.ProviderKind, s.fetchGroupsByIDs)))
 	mux.HandleFunc("/obot-list-user-auth-groups", s.requireAPIClient(s.listUserGroups))
 }
 
@@ -315,12 +386,18 @@ func (s *server) fetchGroupsByIDs(ctx context.Context, ids []string) (state.Grou
 // It answers 403 for a user who is not active in OneLogin, or who OneLogin no longer has, and 503 while OneLogin is
 // rate limiting the admin API client. Obot then keeps the user's cached groups.
 func (s *server) listUserGroups(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUserIDBodyBytes)
+	defer func() { _ = r.Body.Close() }()
+
 	userIDBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			status = http.StatusRequestEntityTooLarge
+		}
+		http.Error(w, fmt.Sprintf("failed to read request body: %v", err), status)
 		return
 	}
-	defer r.Body.Close()
 
 	userID := strings.TrimSpace(string(userIDBytes))
 	if userID == "" {
@@ -366,7 +443,7 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := profile.GetUserInfo(r.Context(), token, s.issuerURL)
+	u, err := profile.GetUserInfo(r.Context(), s.httpClient, token, s.issuerURL)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to get user: %v", err), http.StatusInternalServerError)
 		return
@@ -389,7 +466,8 @@ func oauthCallback(proxy callbackProxy) http.HandlerFunc {
 			return
 		}
 
-		logger.Errorf("OneLogin denied the sign-in: access_denied: %s", query.Get("error_description"))
+		// %q escapes the description, so that a crafted one cannot forge log lines.
+		logger.Errorf("OneLogin denied the sign-in: access_denied: %q", truncate(query.Get("error_description"), maxLoggedErrorDescriptionBytes))
 		// ErrorPage reads the request scope that oauth2-proxy's own middleware adds, and dereferences it, but this
 		// request has not been through that middleware.
 		if middlewareapi.GetRequestScope(r) == nil {
@@ -397,4 +475,12 @@ func oauthCallback(proxy callbackProxy) http.HandlerFunc {
 		}
 		proxy.ErrorPage(w, r, http.StatusForbidden, accessDeniedMessage, accessDeniedMessage)
 	}
+}
+
+// truncate returns s cut to at most n bytes.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
