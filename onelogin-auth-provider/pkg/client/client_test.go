@@ -3,17 +3,21 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"github.com/obot-platform/enterprise-providers/onelogin-auth-provider/pkg/onelogintest"
+	"github.com/obot-platform/enterprise-providers/onelogin-auth-provider/internal/onelogintest"
 )
 
 // testClock is a clock a test moves by hand.
@@ -120,9 +124,9 @@ func TestTokenRequestFailure(t *testing.T) {
 	fake := onelogintest.New(t, nil, nil)
 	c := New(fake.URL, onelogintest.ClientID, "wrong-secret")
 
-	_, err := c.DoRequest(t.Context(), http.MethodGet, "/api/2/roles", nil, nil)
+	_, err := c.doRequest(t.Context(), http.MethodGet, "/api/2/roles", nil)
 	if err == nil || !strings.Contains(err.Error(), "token endpoint returned status 401") {
-		t.Fatalf("DoRequest() error = %v, want a token endpoint 401", err)
+		t.Fatalf("doRequest() error = %v, want a token endpoint 401", err)
 	}
 	if got := fake.RequestCount("/api/2/roles"); got != 0 {
 		t.Errorf("API calls = %d, want 0", got)
@@ -167,9 +171,9 @@ func TestUnauthorizedRetry(t *testing.T) {
 			}
 			c, _ := newTestClient(fake.URL)
 
-			resp, err := c.DoRequest(t.Context(), http.MethodGet, "/api/2/roles", nil, nil)
+			resp, err := c.doRequest(t.Context(), http.MethodGet, "/api/2/roles", nil)
 			if err != nil {
-				t.Fatalf("DoRequest() error = %v", err)
+				t.Fatalf("doRequest() error = %v", err)
 			}
 			_ = resp.Body.Close()
 
@@ -186,47 +190,6 @@ func TestUnauthorizedRetry(t *testing.T) {
 	}
 }
 
-func TestUnauthorizedRetryReplaysBody(t *testing.T) {
-	var (
-		mu     sync.Mutex
-		bodies []string
-		tokens int
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-
-		if r.URL.Path == tokenPath {
-			tokens++
-			_, _ = io.WriteString(w, `{"access_token":"token-`+strconv.Itoa(tokens)+`","expires_in":36000}`)
-			return
-		}
-
-		body, _ := io.ReadAll(r.Body)
-		bodies = append(bodies, string(body))
-		if r.Header.Get("Authorization") == "Bearer token-1" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c, _ := newTestClient(srv.URL)
-	resp, err := c.DoRequest(t.Context(), http.MethodPost, "/api/2/example", nil, []byte(`{"key":"value"}`))
-	if err != nil {
-		t.Fatalf("DoRequest() error = %v", err)
-	}
-	_ = resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	if len(bodies) != 2 || bodies[0] != `{"key":"value"}` || bodies[1] != bodies[0] {
-		t.Errorf("bodies = %q, want the same body twice", bodies)
-	}
-}
-
 func TestRateLimited(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -236,7 +199,7 @@ func TestRateLimited(t *testing.T) {
 		{
 			name:           "without Retry-After",
 			retryAfter:     "",
-			wantRetryAfter: DefaultRateLimitWait,
+			wantRetryAfter: defaultRateLimitWait,
 		},
 		{
 			name:           "Retry-After in seconds",
@@ -256,38 +219,38 @@ func TestRateLimited(t *testing.T) {
 		{
 			name:           "malformed Retry-After",
 			retryAfter:     "soon",
-			wantRetryAfter: DefaultRateLimitWait,
+			wantRetryAfter: defaultRateLimitWait,
 		},
 		{
 			name:           "Retry-After in the past",
 			retryAfter:     "Wed, 14 Oct 2026 19:00:00 GMT",
-			wantRetryAfter: DefaultRateLimitWait,
+			wantRetryAfter: defaultRateLimitWait,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := onelogintest.New(t, testRoles(1), nil)
-			fake.SetRateLimited(true, tt.retryAfter)
+			fake.RateLimit(tt.retryAfter)
 			c, clock := newTestClient(fake.URL)
 
-			_, err := c.DoRequest(t.Context(), http.MethodGet, "/api/2/roles", nil, nil)
+			_, err := c.doRequest(t.Context(), http.MethodGet, "/api/2/roles", nil)
 			var rateLimitErr *RateLimitedError
 			if !errors.As(err, &rateLimitErr) {
-				t.Fatalf("DoRequest() error = %v, want a RateLimitedError", err)
+				t.Fatalf("doRequest() error = %v, want a RateLimitedError", err)
 			}
 			if rateLimitErr.RetryAfter != tt.wantRetryAfter {
 				t.Errorf("RetryAfter = %s, want %s", rateLimitErr.RetryAfter, tt.wantRetryAfter)
 			}
 
 			// OneLogin stops rate limiting at once, but the client waits out the whole window without calling it.
-			fake.SetRateLimited(false, "")
+			fake.StopRateLimiting()
 			clock.Advance(tt.wantRetryAfter - time.Second)
 
 			if err := c.RateLimitErr(); !errors.As(err, &rateLimitErr) || rateLimitErr.RetryAfter != time.Second {
 				t.Errorf("RateLimitErr() = %v, want a RateLimitedError with a second left", err)
 			}
-			if _, err := c.DoRequest(t.Context(), http.MethodGet, "/api/2/roles", nil, nil); !errors.As(err, &rateLimitErr) {
-				t.Fatalf("DoRequest() in the window error = %v, want a RateLimitedError", err)
+			if _, err := c.doRequest(t.Context(), http.MethodGet, "/api/2/roles", nil); !errors.As(err, &rateLimitErr) {
+				t.Fatalf("doRequest() in the window error = %v, want a RateLimitedError", err)
 			}
 			if got := fake.RequestCount("/api/2/roles"); got != 1 {
 				t.Errorf("API calls in the window = %d, want 1", got)
@@ -298,9 +261,9 @@ func TestRateLimited(t *testing.T) {
 			if err := c.RateLimitErr(); err != nil {
 				t.Errorf("RateLimitErr() after the window = %v, want nil", err)
 			}
-			resp, err := c.DoRequest(t.Context(), http.MethodGet, "/api/2/roles", nil, nil)
+			resp, err := c.doRequest(t.Context(), http.MethodGet, "/api/2/roles", nil)
 			if err != nil {
-				t.Fatalf("DoRequest() after the window error = %v", err)
+				t.Fatalf("doRequest() after the window error = %v", err)
 			}
 			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
@@ -322,11 +285,11 @@ func TestRateLimitedTokenRequest(t *testing.T) {
 	c, _ := newTestClient(srv.URL)
 
 	var rateLimitErr *RateLimitedError
-	if _, err := c.DoRequest(t.Context(), http.MethodGet, "/api/2/roles", nil, nil); !errors.As(err, &rateLimitErr) || rateLimitErr.RetryAfter != time.Minute {
-		t.Fatalf("DoRequest() error = %v, want a RateLimitedError of a minute", err)
+	if _, err := c.doRequest(t.Context(), http.MethodGet, "/api/2/roles", nil); !errors.As(err, &rateLimitErr) || rateLimitErr.RetryAfter != time.Minute {
+		t.Fatalf("doRequest() error = %v, want a RateLimitedError of a minute", err)
 	}
-	if _, err := c.DoRequest(t.Context(), http.MethodGet, "/api/2/roles", nil, nil); !errors.As(err, &rateLimitErr) {
-		t.Fatalf("second DoRequest() error = %v, want a RateLimitedError", err)
+	if _, err := c.doRequest(t.Context(), http.MethodGet, "/api/2/roles", nil); !errors.As(err, &rateLimitErr) {
+		t.Fatalf("second doRequest() error = %v, want a RateLimitedError", err)
 	}
 	if calls != 1 {
 		t.Errorf("calls = %d, want 1", calls)
@@ -416,7 +379,7 @@ func TestListAll(t *testing.T) {
 			fake := onelogintest.New(t, testRoles(tt.roles), nil)
 			c, _ := newTestClient(fake.URL)
 
-			got, err := ListAll[testRole](t.Context(), c, "/api/2/roles", tt.query, tt.maxItems)
+			got, err := ListAll[testRole](t.Context(), c, "/api/2/roles", tt.query, tt.maxItems, 0)
 			if err != nil {
 				t.Fatalf("ListAll() error = %v", err)
 			}
@@ -462,19 +425,295 @@ func TestListAllRepeatedCursor(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := newTestClient(srv.URL)
-	if _, err := ListAll[testRole](t.Context(), c, "/api/2/roles", nil, 100); err == nil {
+	if _, err := ListAll[testRole](t.Context(), c, "/api/2/roles", nil, 100, 0); err == nil {
 		t.Fatal("ListAll() error = nil, want an error for a repeated cursor")
 	}
 }
 
-func TestDoRequestCanceledContext(t *testing.T) {
+func TestRequestCanceledContext(t *testing.T) {
 	fake := onelogintest.New(t, nil, nil)
 	c, _ := newTestClient(fake.URL)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	if _, err := c.DoRequest(ctx, http.MethodGet, "/api/2/roles", nil, nil); !errors.Is(err, context.Canceled) {
-		t.Errorf("DoRequest() error = %v, want context.Canceled", err)
+	if _, err := c.doRequest(ctx, http.MethodGet, "/api/2/roles", nil); !errors.Is(err, context.Canceled) {
+		t.Errorf("doRequest() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestTokenRequestShared(t *testing.T) {
+	const callers = 5
+
+	tests := []struct {
+		name            string
+		tokenStatus     int
+		wantRateLimited bool
+		wantAPICalls    int
+	}{
+		{
+			name:            "waiting callers share the token",
+			tokenStatus:     http.StatusOK,
+			wantRateLimited: false,
+			wantAPICalls:    callers,
+		},
+		{
+			name:            "waiting callers share a 429",
+			tokenStatus:     http.StatusTooManyRequests,
+			wantRateLimited: true,
+			wantAPICalls:    0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := onelogintest.New(t, testRoles(1), nil)
+
+			synctest.Test(t, func(t *testing.T) {
+				var (
+					tokenRequests atomic.Int32
+					release       = make(chan struct{})
+				)
+				// The token request blocks until release is closed, so that every caller is waiting on it.
+				transport := onelogintest.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Path == onelogintest.TokenPath {
+						tokenRequests.Add(1)
+						select {
+						case <-release:
+						case <-req.Context().Done():
+							return nil, req.Context().Err()
+						}
+						if tt.tokenStatus != http.StatusOK {
+							return &http.Response{
+								StatusCode: tt.tokenStatus,
+								Header:     http.Header{"Retry-After": []string{"60"}},
+								Body:       http.NoBody,
+								Request:    req,
+							}, nil
+						}
+					}
+					return fake.Transport().RoundTrip(req)
+				})
+				c := New(fake.URL, onelogintest.ClientID, onelogintest.ClientSecret, WithHTTPClient(&http.Client{Transport: transport}))
+
+				var (
+					wg   sync.WaitGroup
+					errs = make([]error, callers)
+				)
+				for i := range errs {
+					wg.Go(func() {
+						var roles []testRole
+						_, errs[i] = c.GetJSON(t.Context(), "/api/2/roles", nil, &roles)
+					})
+				}
+
+				// One more caller gives up while the token request is in flight. It returns at once, and the
+				// request carries on for the others.
+				ctx, cancel := context.WithCancel(t.Context())
+				quitterErr := make(chan error, 1)
+				go func() {
+					var roles []testRole
+					_, err := c.GetJSON(ctx, "/api/2/roles", nil, &roles)
+					quitterErr <- err
+				}()
+
+				synctest.Wait()
+				cancel()
+				if err := <-quitterErr; !errors.Is(err, context.Canceled) {
+					t.Errorf("GetJSON() of the caller that gave up error = %v, want context.Canceled", err)
+				}
+
+				close(release)
+				wg.Wait()
+
+				for i, err := range errs {
+					if _, rateLimited := errors.AsType[*RateLimitedError](err); rateLimited != tt.wantRateLimited {
+						t.Errorf("caller %d error = %v, want a RateLimitedError: %v", i, err, tt.wantRateLimited)
+					}
+					if !tt.wantRateLimited && err != nil {
+						t.Errorf("caller %d error = %v", i, err)
+					}
+				}
+				if got := tokenRequests.Load(); got != 1 {
+					t.Errorf("token requests = %d, want 1", got)
+				}
+				if got := fake.RequestCount("/api/2/roles"); got != tt.wantAPICalls {
+					t.Errorf("API calls = %d, want %d", got, tt.wantAPICalls)
+				}
+			})
+		})
+	}
+}
+
+func TestTokenRequestTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// OneLogin never answers the token request.
+		transport := onelogintest.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})
+		c := New("https://example.onelogin.com", onelogintest.ClientID, onelogintest.ClientSecret, WithHTTPClient(&http.Client{Transport: transport}))
+
+		start := time.Now()
+		var roles []testRole
+		if _, err := c.GetJSON(t.Context(), "/api/2/roles", nil, &roles); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("GetJSON() error = %v, want context.DeadlineExceeded", err)
+		}
+		if elapsed := time.Since(start); elapsed != tokenFetchTimeout {
+			t.Errorf("GetJSON() returned after %s, want %s", elapsed, tokenFetchTimeout)
+		}
+	})
+}
+
+func TestListAllPageTimeout(t *testing.T) {
+	const (
+		pageTimeout = time.Minute
+		pageDelay   = 45 * time.Second
+	)
+	tests := []struct {
+		name        string
+		stalledPage int
+		wantErr     error
+		wantElapsed time.Duration
+	}{
+		{
+			name:        "slow pages that each finish in time",
+			stalledPage: 0,
+			wantErr:     nil,
+			wantElapsed: 3 * pageDelay,
+		},
+		{
+			name:        "a stalled second page",
+			stalledPage: 2,
+			wantErr:     context.DeadlineExceeded,
+			wantElapsed: pageDelay + pageTimeout,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				transport := onelogintest.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Path == onelogintest.TokenPath {
+						return jsonResponse(req, `{"access_token":"token","expires_in":36000}`, nil), nil
+					}
+
+					page := 1
+					if cursor := req.URL.Query().Get("cursor"); cursor != "" {
+						page, _ = strconv.Atoi(cursor)
+					}
+					if page == tt.stalledPage {
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					}
+					time.Sleep(pageDelay)
+
+					header := http.Header{}
+					if page < 3 {
+						header.Set(AfterCursorHeader, strconv.Itoa(page+1))
+					}
+					return jsonResponse(req, fmt.Sprintf(`[{"id":%d,"name":"role-%d"}]`, page, page), header), nil
+				})
+				c := New("https://example.onelogin.com", onelogintest.ClientID, onelogintest.ClientSecret, WithHTTPClient(&http.Client{Transport: transport}))
+
+				start := time.Now()
+				roles, err := ListAll[testRole](t.Context(), c, "/api/2/roles", nil, 100, pageTimeout)
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ListAll() error = %v, want %v", err, tt.wantErr)
+				}
+				if elapsed := time.Since(start); elapsed != tt.wantElapsed {
+					t.Errorf("ListAll() returned after %s, want %s", elapsed, tt.wantElapsed)
+				}
+				if tt.wantErr == nil && len(roles) != 3 {
+					t.Errorf("ListAll() returned %d roles, want 3", len(roles))
+				}
+			})
+		})
+	}
+}
+
+// jsonResponse builds a 200 response with body and header, for in-memory transports.
+func jsonResponse(req *http.Request, body string, header http.Header) *http.Response {
+	if header == nil {
+		header = http.Header{}
+	}
+	header.Set("Content-Type", "application/json")
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
+func TestNewHTTPClient(t *testing.T) {
+	httpClient := NewHTTPClient()
+	if httpClient.Timeout != requestTimeout {
+		t.Errorf("Timeout = %s, want %s", httpClient.Timeout, requestTimeout)
+	}
+
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is a %T, want an *http.Transport", httpClient.Transport)
+	}
+	if transport.ResponseHeaderTimeout != responseHeaderTimeout {
+		t.Errorf("ResponseHeaderTimeout = %s, want %s", transport.ResponseHeaderTimeout, responseHeaderTimeout)
+	}
+	if transport.MaxIdleConnsPerHost != maxIdleConnsPerHost {
+		t.Errorf("MaxIdleConnsPerHost = %d, want %d", transport.MaxIdleConnsPerHost, maxIdleConnsPerHost)
+	}
+	if transport == http.DefaultTransport {
+		t.Error("Transport is http.DefaultTransport, want a clone")
+	}
+}
+
+func TestGetJSONResponseTooLarge(t *testing.T) {
+	fake := onelogintest.New(t, nil, nil)
+	transport := onelogintest.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == onelogintest.TokenPath {
+			return fake.Transport().RoundTrip(req)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("[" + strings.Repeat("1,", maxResponseBodyBytes/2) + "1]")),
+			Request:    req,
+		}, nil
+	})
+	c := New(fake.URL, onelogintest.ClientID, onelogintest.ClientSecret, WithHTTPClient(&http.Client{Transport: transport}))
+
+	var ids []int
+	if _, err := c.GetJSON(t.Context(), "/api/2/roles", nil, &ids); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("GetJSON() error = %v, want one for a response over the cap", err)
+	}
+}
+
+func TestGetJSONReusesConnections(t *testing.T) {
+	var newConns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == tokenPath {
+			_, _ = io.WriteString(w, `{"access_token":"token","expires_in":36000}`)
+			return
+		}
+		// Whitespace after the JSON value is left unread by the decoder, so only draining lets the connection be
+		// reused. Go 1.27's transport drains a small remainder on its own, so this fails without the drain only on
+		// earlier versions, such as the go.mod minimum.
+		_, _ = io.WriteString(w, "[]"+strings.Repeat(" ", 2048))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	c, _ := newTestClient(srv.URL)
+	for i := range 3 {
+		var roles []testRole
+		if _, err := c.GetJSON(t.Context(), "/api/2/roles", nil, &roles); err != nil {
+			t.Fatalf("GetJSON() %d error = %v", i, err)
+		}
+	}
+
+	if got := newConns.Load(); got != 1 {
+		t.Errorf("connections = %d, want 1", got)
 	}
 }

@@ -8,13 +8,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	oauth2proxy "github.com/oauth2-proxy/oauth2-proxy/v7"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
-	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/validation"
 	"github.com/obot-platform/enterprise-providers/authcommon"
+	"github.com/obot-platform/enterprise-providers/onelogin-auth-provider/internal/onelogintest"
 	"github.com/obot-platform/enterprise-providers/onelogin-auth-provider/pkg/client"
-	"github.com/obot-platform/enterprise-providers/onelogin-auth-provider/pkg/onelogintest"
 	"github.com/obot-platform/enterprise-providers/onelogin-auth-provider/pkg/profile"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
@@ -120,9 +120,121 @@ func TestAPIBaseURL(t *testing.T) {
 			wantErr:   false,
 		},
 		{
+			name:      "override with an empty query",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "https://api.us.onelogin.com/?",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "override with an empty fragment",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "https://api.us.onelogin.com#",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "override with a path",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "https://api.us.onelogin.com/api/2",
+			want:      "",
+			wantErr:   true,
+		},
+		{
 			name:      "issuer without a scheme",
 			issuerURL: "example.onelogin.com/oidc/2",
 			override:  "",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "issuer over http",
+			issuerURL: "http://example.onelogin.com/oidc/2",
+			override:  "",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "issuer over http on a loopback host",
+			issuerURL: "http://127.0.0.1:8080/oidc/2",
+			override:  "",
+			want:      "http://127.0.0.1:8080",
+			wantErr:   false,
+		},
+		{
+			name:      "override over http",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "http://api.us.onelogin.com",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "override over http on localhost",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "http://localhost:8080",
+			want:      "http://localhost:8080",
+			wantErr:   false,
+		},
+		{
+			name:      "override over http on an IPv4 loopback address",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "http://127.0.0.1:8080/",
+			want:      "http://127.0.0.1:8080",
+			wantErr:   false,
+		},
+		{
+			name:      "override over http on the IPv6 loopback address",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "http://[::1]:8080",
+			want:      "http://[::1]:8080",
+			wantErr:   false,
+		},
+		{
+			name:      "override over http on a host that only starts with localhost",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "http://localhost.example.com",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "override with another scheme",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "ftp://api.us.onelogin.com",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "override without a scheme",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "api.us.onelogin.com",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "override without a host",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "https:///api",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "override with a query",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "https://api.us.onelogin.com/?region=us",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "override with user info",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "https://user:pass@api.us.onelogin.com",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "unparseable override",
+			issuerURL: "https://example.onelogin.com/oidc/2",
+			override:  "https://api.us.onelogin.com:port",
 			want:      "",
 			wantErr:   true,
 		},
@@ -178,7 +290,7 @@ func TestRegisterDirectoryRoutesWithoutAPIClient(t *testing.T) {
 			name:   "list user groups",
 			method: http.MethodPost,
 			target: "/obot-list-user-auth-groups",
-			body:   "263801284",
+			body:   "300000001",
 		},
 	}
 	for _, tt := range tests {
@@ -256,58 +368,74 @@ func newTestDirectoryServer(t *testing.T) (*onelogintest.Server, *http.ServeMux)
 
 func TestDirectoryRoutes(t *testing.T) {
 	tests := []struct {
+		name    string
+		method  string
+		target  string
+		body    string
+		wantIDs []string
+	}{
+		{
+			name:    "list groups",
+			method:  http.MethodGet,
+			target:  "/obot-list-auth-groups?name=OBOT&limit=10",
+			body:    "",
+			wantIDs: []string{"onelogin/1100002", "onelogin/1100003"},
+		},
+		{
+			name:    "get groups",
+			method:  http.MethodGet,
+			target:  "/obot-get-auth-groups?ids=onelogin/1100004,onelogin/1100099,onelogin/abc,okta/00g1",
+			body:    "",
+			wantIDs: []string{"onelogin/1100004"},
+		},
+		{
+			name:    "list user groups",
+			method:  http.MethodPost,
+			target:  "/obot-list-user-auth-groups",
+			body:    "300000001\n",
+			wantIDs: []string{"onelogin/1100002", "onelogin/1100004"},
+		},
+		{
+			name:    "list user groups of a user without roles",
+			method:  http.MethodPost,
+			target:  "/obot-list-user-auth-groups",
+			body:    "300000002",
+			wantIDs: []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, mux := newTestDirectoryServer(t)
+
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body)))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d, body %q", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if got := responseGroupIDs(t, tt.target, rec.Body.Bytes()); !slices.Equal(got, tt.wantIDs) {
+				t.Errorf("ids = %v, want %v", got, tt.wantIDs)
+			}
+		})
+	}
+}
+
+func TestDirectoryRoutesErrors(t *testing.T) {
+	tests := []struct {
 		name       string
 		method     string
 		target     string
 		body       string
 		wantStatus int
-		wantIDs    []string
 		wantBody   string
 	}{
-		{
-			name:       "list groups",
-			method:     http.MethodGet,
-			target:     "/obot-list-auth-groups?name=OBOT&limit=10",
-			body:       "",
-			wantStatus: http.StatusOK,
-			wantIDs:    []string{"onelogin/1100002", "onelogin/1100003"},
-			wantBody:   "",
-		},
 		{
 			name:       "list groups with a cursor from another provider",
 			method:     http.MethodGet,
 			target:     "/obot-list-auth-groups?limit=10&cursor=eyJ2IjoxLCJwIjoib2t0YSIsImwiOjEwLCJ0IjowLCJuIjoieCJ9",
 			body:       "",
 			wantStatus: http.StatusBadRequest,
-			wantIDs:    nil,
 			wantBody:   "invalid cursor",
-		},
-		{
-			name:       "get groups",
-			method:     http.MethodGet,
-			target:     "/obot-get-auth-groups?ids=onelogin/1100004,onelogin/1100099,onelogin/abc,okta/00g1",
-			body:       "",
-			wantStatus: http.StatusOK,
-			wantIDs:    []string{"onelogin/1100004"},
-			wantBody:   "",
-		},
-		{
-			name:       "list user groups",
-			method:     http.MethodPost,
-			target:     "/obot-list-user-auth-groups",
-			body:       "300000001\n",
-			wantStatus: http.StatusOK,
-			wantIDs:    []string{"onelogin/1100002", "onelogin/1100004"},
-			wantBody:   "",
-		},
-		{
-			name:       "list user groups of a user without roles",
-			method:     http.MethodPost,
-			target:     "/obot-list-user-auth-groups",
-			body:       "300000002",
-			wantStatus: http.StatusOK,
-			wantIDs:    []string{},
-			wantBody:   "[]",
 		},
 		{
 			name:       "list user groups of a suspended user",
@@ -315,7 +443,6 @@ func TestDirectoryRoutes(t *testing.T) {
 			target:     "/obot-list-user-auth-groups",
 			body:       "300000003",
 			wantStatus: http.StatusForbidden,
-			wantIDs:    nil,
 			wantBody:   "OneLogin account is not active (status 2: suspended)",
 		},
 		{
@@ -324,7 +451,6 @@ func TestDirectoryRoutes(t *testing.T) {
 			target:     "/obot-list-user-auth-groups",
 			body:       "300000099",
 			wantStatus: http.StatusForbidden,
-			wantIDs:    nil,
 			wantBody:   "OneLogin user was not found",
 		},
 		{
@@ -333,7 +459,6 @@ func TestDirectoryRoutes(t *testing.T) {
 			target:     "/obot-list-user-auth-groups",
 			body:       "00u1abcd",
 			wantStatus: http.StatusBadRequest,
-			wantIDs:    nil,
 			wantBody:   "invalid OneLogin user ID",
 		},
 		{
@@ -342,13 +467,21 @@ func TestDirectoryRoutes(t *testing.T) {
 			target:     "/obot-list-user-auth-groups",
 			body:       " ",
 			wantStatus: http.StatusBadRequest,
-			wantIDs:    nil,
 			wantBody:   "user ID is required",
+		},
+		{
+			name:       "list user groups with an oversized body",
+			method:     http.MethodPost,
+			target:     "/obot-list-user-auth-groups",
+			body:       strings.Repeat("1", maxUserIDBodyBytes+1),
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantBody:   "request body too large",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, mux := newTestDirectoryServer(t)
+			fake, mux := newTestDirectoryServer(t)
+			calls := len(fake.Requests())
 
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body)))
@@ -359,18 +492,17 @@ func TestDirectoryRoutes(t *testing.T) {
 			if !strings.Contains(rec.Body.String(), tt.wantBody) {
 				t.Errorf("body = %q, want it to contain %q", rec.Body.String(), tt.wantBody)
 			}
-			if tt.wantIDs == nil {
-				return
-			}
-
-			if got := responseGroupIDs(t, tt.target, rec.Body.Bytes()); !slices.Equal(got, tt.wantIDs) {
-				t.Errorf("ids = %v, want %v", got, tt.wantIDs)
+			if tt.wantStatus == http.StatusBadRequest || tt.wantStatus == http.StatusRequestEntityTooLarge {
+				if got := len(fake.Requests()); got != calls {
+					t.Errorf("calls to OneLogin for a bad request = %d, want 0", got-calls)
+				}
 			}
 		})
 	}
 }
 
-// responseGroupIDs returns the group IDs in the body of a directory endpoint's response.
+// responseGroupIDs returns the group IDs in the body of a directory endpoint's response. A null list fails the test,
+// because Obot expects an empty list rather than null.
 func responseGroupIDs(t *testing.T, target string, body []byte) []string {
 	t.Helper()
 
@@ -385,6 +517,9 @@ func responseGroupIDs(t *testing.T, target string, body []byte) []string {
 			t.Fatalf("failed to decode body %q: %v", body, err)
 		}
 		groups = list.Items
+	}
+	if groups == nil {
+		t.Fatalf("body %q has null where a list of groups belongs", body)
 	}
 
 	ids := make([]string, 0, len(groups))
@@ -438,7 +573,7 @@ func TestListGroupsCursorRoundTrip(t *testing.T) {
 
 func TestDirectoryRoutesRateLimited(t *testing.T) {
 	fake, mux := newTestDirectoryServer(t)
-	fake.SetRateLimited(true, "30")
+	fake.RateLimit("30")
 
 	serve := func(method, target, body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -459,7 +594,7 @@ func TestDirectoryRoutesRateLimited(t *testing.T) {
 	}
 
 	// OneLogin recovers at once, but nothing calls it until the wait is over.
-	fake.SetRateLimited(false, "")
+	fake.StopRateLimiting()
 	calls := len(fake.Requests())
 
 	tests := []struct {
@@ -555,54 +690,90 @@ func TestRequireAPIClient(t *testing.T) {
 	}
 }
 
-func TestGetUserInfo(t *testing.T) {
-	// Stands in for OneLogin's userinfo endpoint, <issuer>/me. The body is the one OneLogin returned in the phase 0b
-	// capture.
+// newTestUserInfoServer returns a server whose GET /obot-get-user-info calls a stand-in for OneLogin's userinfo
+// endpoint, <issuer>/me. The endpoint accepts only the token "good-token", and answers "huge-token" with a body over
+// the size cap.
+func newTestUserInfoServer(t *testing.T) *server {
+	t.Helper()
+
 	oneLogin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/oidc/2/me" {
 			http.NotFound(w, r)
 			return
 		}
-		if r.Header.Get("Authorization") != "Bearer good-token" {
-			http.Error(w, `{"error":"invalid_token"}`, http.StatusUnauthorized)
-			return
+		switch r.Header.Get("Authorization") {
+		case "Bearer good-token":
+			// The claims OneLogin's userinfo endpoint returns for the openid, email and profile scopes. sub is the
+			// numeric OneLogin user ID.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"email":"user@example.com","family_name":"User","given_name":"Test","name":"Test User","preferred_username":"test_user","sub":"300000001","updated_at":1792006400}`))
+		case "Bearer huge-token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"sub":"300000001","name":"` + strings.Repeat("x", 1<<20) + `"}`))
+		default:
+			http.Error(w, `{"error":"invalid_token"}`+strings.Repeat(" ", 1<<20), http.StatusUnauthorized)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"email":"user@example.com","family_name":"Testing1","given_name":"Grant","name":"Grant Testing1","preferred_username":"grant_testing1","sub":"263801284","updated_at":1792006400}`))
 	}))
-	defer oneLogin.Close()
+	t.Cleanup(oneLogin.Close)
 
-	srv := &server{
-		issuerURL: oneLogin.URL + "/oidc/2",
+	return &server{
+		issuerURL:  oneLogin.URL + "/oidc/2",
+		httpClient: client.NewHTTPClient(),
 	}
+}
+
+func TestGetUserInfo(t *testing.T) {
+	srv := newTestUserInfoServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/obot-get-user-info", nil)
+	req.Header.Set("Authorization", "Bearer good-token")
+
+	rec := httptest.NewRecorder()
+	srv.getUserInfo(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "icon_url") {
+		t.Errorf("body = %q, want no icon_url", rec.Body.String())
+	}
+
+	var got profile.UserInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("failed to decode body %q: %v", rec.Body.String(), err)
+	}
+	want := profile.UserInfo{
+		ID:      "300000001",
+		Name:    "Test User",
+		IconURL: "",
+	}
+	if got != want {
+		t.Errorf("user = %+v, want %+v", got, want)
+	}
+}
+
+func TestGetUserInfoErrors(t *testing.T) {
+	srv := newTestUserInfoServer(t)
 
 	tests := []struct {
 		name          string
 		authorization string
 		wantStatus    int
-		wantUser      *profile.UserInfo
 	}{
-		{
-			name:          "valid token",
-			authorization: "Bearer good-token",
-			wantStatus:    http.StatusOK,
-			wantUser: &profile.UserInfo{
-				ID:      "263801284",
-				Name:    "Grant Testing1",
-				IconURL: "",
-			},
-		},
 		{
 			name:          "no token",
 			authorization: "",
 			wantStatus:    http.StatusUnauthorized,
-			wantUser:      nil,
 		},
 		{
 			name:          "token OneLogin rejects",
 			authorization: "Bearer bad-token",
 			wantStatus:    http.StatusInternalServerError,
-			wantUser:      nil,
+		},
+		{
+			name:          "oversized response",
+			authorization: "Bearer huge-token",
+			wantStatus:    http.StatusInternalServerError,
 		},
 	}
 	for _, tt := range tests {
@@ -618,28 +789,17 @@ func TestGetUserInfo(t *testing.T) {
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d, body %q", rec.Code, tt.wantStatus, rec.Body.String())
 			}
-			if tt.wantUser == nil {
-				return
-			}
-
-			if strings.Contains(rec.Body.String(), "icon_url") {
-				t.Errorf("body = %q, want no icon_url", rec.Body.String())
-			}
-
-			var got profile.UserInfo
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-				t.Fatalf("failed to decode body %q: %v", rec.Body.String(), err)
-			}
-			if got != *tt.wantUser {
-				t.Errorf("user = %+v, want %+v", got, *tt.wantUser)
+			// OneLogin's error body is cut short before it reaches the response.
+			if got := rec.Body.Len(); got > 2*client.MaxErrorBodyBytes {
+				t.Errorf("body length = %d, want at most %d", got, 2*client.MaxErrorBodyBytes)
 			}
 		})
 	}
 }
 
-// newTestOAuthProxy returns an oauth2-proxy configured as main configures it, against a stand-in OIDC issuer that
-// serves only discovery.
-func newTestOAuthProxy(t *testing.T) *oauth2proxy.OAuthProxy {
+// newTestOAuthProxyOptions returns the options main gives oauth2-proxy, against a stand-in OIDC issuer that serves
+// only discovery.
+func newTestOAuthProxyOptions(t *testing.T) *options.Options {
 	t.Helper()
 
 	var issuerURL string
@@ -661,32 +821,44 @@ func newTestOAuthProxy(t *testing.T) *oauth2proxy.OAuthProxy {
 	t.Cleanup(issuer.Close)
 	issuerURL = issuer.URL + "/oidc/2"
 
-	legacyOpts := options.NewLegacyOptions()
-	legacyOpts.LegacyProvider.ProviderType = "oidc"
-	legacyOpts.LegacyProvider.ProviderName = "oidc"
-	legacyOpts.LegacyProvider.ClientID = "client-id"
-	legacyOpts.LegacyProvider.ClientSecret = "client-secret"
-	legacyOpts.LegacyProvider.OIDCIssuerURL = issuerURL
-	legacyOpts.LegacyProvider.Scope = "openid email profile"
-
-	opts, err := legacyOpts.ToOptions()
+	opts, err := newOAuthProxyOptions(Options{
+		ClientID:         "client-id",
+		ClientSecret:     "client-secret",
+		IssuerURL:        issuerURL,
+		ObotServerURL:    "http://localhost:8080",
+		AuthEmailDomains: "*",
+	}, time.Hour, []byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
-		t.Fatalf("failed to convert legacy options: %v", err)
-	}
-	opts.Server.BindAddress = ""
-	opts.MetricsServer.BindAddress = ""
-	opts.Cookie.Name = "obot_access_token"
-	opts.Cookie.Secret = "0123456789abcdef0123456789abcdef"
-	opts.RawRedirectURL = "http://localhost:8080/"
-	opts.EmailDomains = []string{"*"}
-	opts.Logging.RequestEnabled = false
-	opts.Logging.AuthEnabled = false
-	opts.Logging.StandardEnabled = false
-
-	if err := validation.Validate(opts); err != nil {
-		t.Fatalf("failed to validate options: %v", err)
+		t.Fatalf("newOAuthProxyOptions() error = %v", err)
 	}
 
+	return opts
+}
+
+func TestNewOAuthProxyOptions(t *testing.T) {
+	opts := newTestOAuthProxyOptions(t)
+
+	if len(opts.Providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(opts.Providers))
+	}
+	provider := opts.Providers[0]
+	if provider.Type != options.OIDCProvider {
+		t.Errorf("provider type = %q, want %q", provider.Type, options.OIDCProvider)
+	}
+	// OneLogin fails the sign-in with invalid_scope when offline_access is requested.
+	if provider.Scope != "openid email profile" {
+		t.Errorf("scope = %q, want %q", provider.Scope, "openid email profile")
+	}
+	if opts.Cookie.Secure {
+		t.Error("cookie is Secure for an http Obot URL, want not")
+	}
+}
+
+// newTestOAuthProxy returns an oauth2-proxy with the options main gives it, against a stand-in OIDC issuer.
+func newTestOAuthProxy(t *testing.T) *oauth2proxy.OAuthProxy {
+	t.Helper()
+
+	opts := newTestOAuthProxyOptions(t)
 	proxy, err := oauth2proxy.NewOAuthProxy(opts, oauth2proxy.NewValidator(opts.EmailDomains, opts.AuthenticatedEmailsFile))
 	if err != nil {
 		t.Fatalf("failed to create oauth2 proxy: %v", err)
@@ -705,7 +877,7 @@ func TestOAuthCallback(t *testing.T) {
 		wantBody   string
 	}{
 		{
-			// What OneLogin sends for a user who has not been given access to the app (phase 0b, A8).
+			// What OneLogin sends at the callback for a user who has not been given access to the app.
 			name:       "access denied",
 			target:     "/oauth2/callback?error=access_denied&error_description=End-user+does+not+have+access+to+this+application&state=abc",
 			wantStatus: http.StatusForbidden,

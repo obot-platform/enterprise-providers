@@ -1,6 +1,7 @@
 // Package onelogintest provides a fake of the parts of the OneLogin admin API that directory synchronization calls,
-// for tests. It behaves as OneLogin did in the phase 0b capture: v2 lists are bare JSON arrays sorted by ID, the
-// role name filter is a case-insensitive substring match, and paging follows an After-Cursor that must be sent alone.
+// for tests. It behaves as OneLogin's v2 API has been observed to: lists are bare JSON arrays sorted by ID, the role
+// name filter is a case-insensitive substring match, and paging follows an After-Cursor that OneLogin rejects with
+// 400 when it is sent along with limit or page.
 package onelogintest
 
 import (
@@ -25,6 +26,9 @@ const (
 
 	// TokenLifetimeSeconds is the expires_in of every token the fake issues, as OneLogin's.
 	TokenLifetimeSeconds = 36000
+
+	// TokenPath is the path of OneLogin's token endpoint.
+	TokenPath = "/auth/oauth2/v2/token"
 )
 
 // Role is a OneLogin role.
@@ -52,6 +56,7 @@ type Server struct {
 	rateLimited   bool
 	retryAfter    string
 	rejectedToken map[string]bool
+	failingPaths  map[string]int
 }
 
 // New starts a fake with the given roles and users, and stops it when the test ends.
@@ -61,6 +66,7 @@ func New(t testing.TB, roles []Role, users []User) *Server {
 	s := &Server{
 		users:         make(map[int64]User, len(users)),
 		rejectedToken: map[string]bool{},
+		failingPaths:  map[string]int{},
 	}
 	s.SetRoles(roles)
 	for _, u := range users {
@@ -68,7 +74,7 @@ func New(t testing.TB, roles []Role, users []User) *Server {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /auth/oauth2/v2/token", s.token)
+	mux.HandleFunc("POST "+TokenPath, s.token)
 	mux.HandleFunc("GET /api/2/roles", s.authenticated(s.listRoles))
 	mux.HandleFunc("GET /api/2/roles/{id}", s.authenticated(s.getRole))
 	mux.HandleFunc("GET /api/2/users/{id}", s.authenticated(s.getUser))
@@ -90,14 +96,71 @@ func (s *Server) SetRoles(roles []Role) {
 	})
 }
 
-// SetRateLimited makes every API call answer 429, with retryAfter as its Retry-After header when it is not empty,
-// or stops doing so.
-func (s *Server) SetRateLimited(rateLimited bool, retryAfter string) {
+// RateLimit makes every API call answer 429, with retryAfter as its Retry-After header unless it is empty.
+func (s *Server) RateLimit(retryAfter string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.rateLimited = rateLimited
+	s.rateLimited = true
 	s.retryAfter = retryAfter
+}
+
+// StopRateLimiting undoes RateLimit.
+func (s *Server) StopRateLimiting() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.rateLimited = false
+	s.retryAfter = ""
+}
+
+// FailPath makes every authenticated API call whose path starts with prefix answer status, as OneLogin does when it
+// fails.
+func (s *Server) FailPath(prefix string, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.failingPaths[prefix] = status
+}
+
+// StopFailingPath undoes FailPath for prefix.
+func (s *Server) StopFailingPath(prefix string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.failingPaths, prefix)
+}
+
+// Transport returns a RoundTripper that serves every request in memory with the fake's handler, whatever its host.
+// Tests in a synctest bubble need it: a request over the network is not durably blocked, so while one is in flight
+// the bubble's clock could not advance.
+func (s *Server) Transport() http.RoundTripper {
+	return RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if err := req.Context().Err(); err != nil {
+			return nil, err
+		}
+
+		r := req.Clone(req.Context())
+		if r.Body == nil {
+			r.Body = http.NoBody
+		}
+		defer func() { _ = r.Body.Close() }()
+
+		rec := httptest.NewRecorder()
+		s.Config.Handler.ServeHTTP(rec, r)
+
+		resp := rec.Result()
+		resp.Request = req
+		return resp, nil
+	})
+}
+
+// RoundTripperFunc adapts a function to an http.RoundTripper.
+type RoundTripperFunc func(*http.Request) (*http.Response, error)
+
+// RoundTrip calls f.
+func (f RoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // RejectToken makes the API answer 401 to the given access token, as OneLogin does for a revoked token.
@@ -170,8 +233,8 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authenticated records the call, and answers 429 while the fake is rate limited and 401 to a token it did not issue
-// or has rejected.
+// authenticated records the call, and answers 429 while the fake is rate limited, 401 to a token it did not issue or
+// has rejected, and the status FailPath set for a failing path.
 func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -179,11 +242,15 @@ func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
 		var (
 			rateLimited = s.rateLimited
 			retryAfter  = s.retryAfter
-			tokens      = s.tokens
-			rejected    = s.rejectedToken
+			failStatus  int
 		)
 		token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		valid := hasBearer && !rejected[token] && validToken(token, tokens)
+		valid := hasBearer && !s.rejectedToken[token] && validToken(token, s.tokens)
+		for prefix, status := range s.failingPaths {
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				failStatus = status
+			}
+		}
 		s.mu.Unlock()
 
 		if rateLimited {
@@ -195,6 +262,10 @@ func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if !valid {
 			writeError(w, http.StatusUnauthorized, "Unauthorized", "Authentication Failure")
+			return
+		}
+		if failStatus != 0 {
+			writeError(w, failStatus, http.StatusText(failStatus), http.StatusText(failStatus))
 			return
 		}
 
@@ -240,7 +311,10 @@ func (s *Server) listRoles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	name := query.Get("name")
+	var (
+		name   = query.Get("name")
+		fields = query.Get("fields")
+	)
 
 	s.mu.Lock()
 	var matching []Role
@@ -259,21 +333,28 @@ func (s *Server) listRoles(w http.ResponseWriter, r *http.Request) {
 		if name != "" {
 			next.Set("name", name)
 		}
+		if fields != "" {
+			next.Set("fields", fields)
+		}
 		next.Set("limit", strconv.Itoa(limit))
-		next.Set("sort", "id")
 		next.Set("page", strconv.Itoa(page+1))
 		w.Header().Set("After-Cursor", base64.StdEncoding.EncodeToString([]byte(next.Encode())))
 	}
 
 	body := make([]map[string]any, 0, end-start)
 	for _, role := range matching[start:end] {
-		body = append(body, roleJSON(role))
+		body = append(body, onlyFields(roleJSON(role), fields))
 	}
 	writeJSON(w, http.StatusOK, body)
 }
 
-// getRole serves GET /api/2/roles/:id.
+// getRole serves GET /api/2/roles/:id. Like OneLogin, it rejects the fields parameter that the role list accepts.
 func (s *Server) getRole(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("fields") {
+		writeError(w, http.StatusBadRequest, "BadRequestError", "Invalid key(s): fields")
+		return
+	}
+
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NotFoundError", "Not Found")
@@ -348,6 +429,23 @@ func roleJSON(role Role) map[string]any {
 		"name":   role.Name,
 		"users":  []int64{},
 	}
+}
+
+// onlyFields keeps the keys of item named in fields, a comma-separated list, as OneLogin's fields parameter does. An
+// empty fields keeps every key.
+func onlyFields(item map[string]any, fields string) map[string]any {
+	if fields == "" {
+		return item
+	}
+
+	names := strings.Split(fields, ",")
+	trimmed := make(map[string]any, len(names))
+	for _, field := range names {
+		if value, ok := item[field]; ok {
+			trimmed[field] = value
+		}
+	}
+	return trimmed
 }
 
 func writeError(w http.ResponseWriter, status int, name, description string) {
