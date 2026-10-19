@@ -16,3 +16,5 @@
 /jumpcloud-auth-provider/go.sum @obot-platform/obot-backend
 /okta-auth-provider/go.mod @obot-platform/obot-backend
 /okta-auth-provider/go.sum @obot-platform/obot-backend
+/onelogin-auth-provider/go.mod @obot-platform/obot-backend
+/onelogin-auth-provider/go.sum @obot-platform/obot-backend
