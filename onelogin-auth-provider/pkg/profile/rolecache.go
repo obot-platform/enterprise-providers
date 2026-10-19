@@ -135,6 +135,11 @@ func (r *RoleCache) Name(ctx context.Context, roleID int64) (name string, found 
 		return name, true, nil
 	}
 
+	// The lookup below runs detached, so a caller that has already given up must not start one.
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+
 	// Concurrent callers share one request. It runs on a context of its own, so that the first caller's
 	// cancellation does not fail the rest, and each caller waits only as long as its own context allows.
 	ch := r.lookups.DoChan(strconv.FormatInt(roleID, 10), func() (any, error) {

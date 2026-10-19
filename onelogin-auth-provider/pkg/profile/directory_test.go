@@ -292,6 +292,30 @@ func TestRoleCacheMiss(t *testing.T) {
 	}
 }
 
+func TestRoleCacheMissCanceled(t *testing.T) {
+	fake := onelogintest.New(t, testRoles, nil)
+
+	synctest.Test(t, func(t *testing.T) {
+		roles := newInMemoryRoleCache(fake, fake.Transport())
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		if _, _, err := roles.Name(ctx, roleEngineering); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Name() error = %v, want context.Canceled", err)
+		}
+		// A lookup the caller started would run detached, so let it finish before counting calls.
+		synctest.Wait()
+
+		if got := len(fake.Requests()); got != 0 {
+			t.Errorf("API calls = %d, want 0", got)
+		}
+		if got := fake.TokenRequests(); got != 0 {
+			t.Errorf("token requests = %d, want 0", got)
+		}
+	})
+}
+
 func TestRoleCacheMissCoalesced(t *testing.T) {
 	fake := onelogintest.New(t, testRoles, nil)
 
