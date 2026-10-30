@@ -1,0 +1,76 @@
+name: "${keycloak_auth_provider_name}"
+command: "keycloak-auth-provider/bin/obot-provider"
+icon: "https://cdn.jsdelivr.net/npm/simple-icons@v13/icons/keycloak.svg"
+description: "${keycloak_auth_provider_description}"
+link: "https://www.keycloak.org/"
+requiredEntitlements:
+  - "OBOT_ENTERPRISE_AUTH_PROVIDERS"
+requiredConfigurationParameters:
+  - name: "OBOT_KEYCLOAK_AUTH_PROVIDER_CLIENT_ID"
+    friendlyName: "${keycloak_auth_provider_client_id_friendly_name}"
+    description: "${keycloak_auth_provider_client_id_description}"
+    sensitive: false
+  - name: "OBOT_KEYCLOAK_AUTH_PROVIDER_CLIENT_SECRET"
+    friendlyName: "${keycloak_auth_provider_client_secret_friendly_name}"
+    description: "${keycloak_auth_provider_client_secret_description}"
+    sensitive: true
+  - name: "OBOT_KEYCLOAK_AUTH_PROVIDER_ISSUER_URL"
+    friendlyName: "${keycloak_auth_provider_issuer_url_friendly_name}"
+    description: "${keycloak_auth_provider_issuer_url_description}"
+    sensitive: false
+  - name: "OBOT_KEYCLOAK_AUTH_PROVIDER_SERVICE_CLIENT_ID"
+    friendlyName: "${keycloak_auth_provider_service_client_id_friendly_name}"
+    description: "${keycloak_auth_provider_service_client_id_description}"
+    sensitive: false
+  - name: "OBOT_KEYCLOAK_AUTH_PROVIDER_SERVICE_CLIENT_SECRET"
+    friendlyName: "${keycloak_auth_provider_service_client_secret_friendly_name}"
+    description: "${keycloak_auth_provider_service_client_secret_description}"
+    sensitive: true
+  - name: "OBOT_AUTH_PROVIDER_COOKIE_SECRET"
+    friendlyName: "${keycloak_auth_provider_cookie_secret_friendly_name}"
+    description: "${keycloak_auth_provider_cookie_secret_description}"
+    sensitive: true
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_EMAIL_DOMAINS"
+    friendlyName: "${keycloak_auth_provider_email_domains_friendly_name}"
+    description: "${keycloak_auth_provider_email_domains_description}"
+    sensitive: false
+optionalConfigurationParameters:
+  - name: "OBOT_AUTH_PROVIDER_ENABLE_LOGGING"
+    friendlyName: "${keycloak_auth_provider_enable_logging_friendly_name}"
+    description: "${keycloak_auth_provider_enable_logging_description}"
+    sensitive: false
+  - name: "OBOT_KEYCLOAK_AUTH_PROVIDER_INSECURE_ALLOW_UNVERIFIED_EMAIL"
+    friendlyName: "${keycloak_auth_provider_insecure_allow_unverified_email_friendly_name}"
+    description: "${keycloak_auth_provider_insecure_allow_unverified_email_description}"
+    sensitive: false
+  - name: "OBOT_KEYCLOAK_AUTH_PROVIDER_ADMIN_URL"
+    friendlyName: "${keycloak_auth_provider_admin_url_friendly_name}"
+    description: "${keycloak_auth_provider_admin_url_description}"
+    sensitive: false
+  - name: "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN"
+    friendlyName: "${keycloak_auth_provider_postgres_connection_dsn_friendly_name}"
+    description: "${keycloak_auth_provider_postgres_connection_dsn_description}"
+    sensitive: true
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_POSTGRES_MAX_CONNECTIONS"
+    friendlyName: "${keycloak_auth_provider_postgres_max_connections_friendly_name}"
+    description: "${keycloak_auth_provider_postgres_max_connections_description}"
+    sensitive: false
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_POSTGRES_MAX_IDLE_CONNECTIONS"
+    friendlyName: "${keycloak_auth_provider_postgres_max_idle_connections_friendly_name}"
+    description: "${keycloak_auth_provider_postgres_max_idle_connections_description}"
+    sensitive: false
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_LIFETIME_SECONDS"
+    friendlyName: "${keycloak_auth_provider_postgres_connection_lifetime_seconds_friendly_name}"
+    description: "${keycloak_auth_provider_postgres_connection_lifetime_seconds_description}"
+    sensitive: false
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"
+    friendlyName: "${keycloak_auth_provider_token_refresh_duration_friendly_name}"
+    description: "${keycloak_auth_provider_token_refresh_duration_description}"
+    sensitive: false
+postgresTablePrefix: "keycloak_"
+groupIDPrefix: "keycloak/"
