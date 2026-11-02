@@ -319,12 +319,10 @@ func fetchMembershipGroups(ctx context.Context, directory *client.Client, ids []
 			}
 		})
 	}
-feed:
-	for index := range ids {
+	for index := 0; index < len(ids) && ctx.Err() == nil; index++ {
 		select {
 		case jobs <- index:
 		case <-ctx.Done():
-			break feed
 		}
 	}
 	close(jobs)
@@ -385,8 +383,8 @@ func FetchGroupsByIDs(ctx context.Context, directory *client.Client, ids []strin
 	var firstErr error
 	sem := make(chan struct{}, groupLookupConcurrency)
 	seen := map[string]bool{}
-schedule:
-	for _, id := range ids {
+	for index := 0; index < len(ids) && ctx.Err() == nil; index++ {
+		id := ids[index]
 		if validateNativeID(id) != nil || seen[id] {
 			continue
 		}
@@ -394,7 +392,7 @@ schedule:
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
-			break schedule
+			continue
 		}
 		wg.Go(func() {
 			defer func() { <-sem }()
