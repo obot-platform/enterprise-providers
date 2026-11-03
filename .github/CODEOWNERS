@@ -14,6 +14,8 @@
 /gemini-vertex-model-provider/go.sum @obot-platform/obot-backend
 /jumpcloud-auth-provider/go.mod @obot-platform/obot-backend
 /jumpcloud-auth-provider/go.sum @obot-platform/obot-backend
+/keycloak-auth-provider/go.mod @obot-platform/obot-backend
+/keycloak-auth-provider/go.sum @obot-platform/obot-backend
 /okta-auth-provider/go.mod @obot-platform/obot-backend
 /okta-auth-provider/go.sum @obot-platform/obot-backend
 /onelogin-auth-provider/go.mod @obot-platform/obot-backend
