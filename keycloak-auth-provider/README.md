@@ -17,9 +17,8 @@ address for the Admin API.
 
 By default, users must have a verified email address in Keycloak to sign in.
 If your organization does not verify email addresses, enable **Allow Unverified
-Emails** in Obot. When allowing unverified emails, avoid granting owner or
-administrator access automatically by email address through deployment settings.
-Email-domain restrictions also depend on users having trustworthy email addresses.
+Emails** in Obot. Email-domain restrictions also depend on users having
+trustworthy email addresses.
 
 **Token Refresh Duration** controls how often Obot refreshes authentication tokens
 for active sessions. The default is 1 hour. Set it shorter than the realm's
