@@ -15,7 +15,7 @@ func listAuthGroups(t *testing.T, s *server, query string) (int, state.GroupInfo
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/obot-list-auth-groups?"+query, nil)
 	rec := httptest.NewRecorder()
-	s.listAuthGroups(rec, req)
+	s.handler().ServeHTTP(rec, req)
 	var page struct {
 		Items      state.GroupInfoList `json:"items"`
 		NextCursor string              `json:"nextCursor"`
@@ -75,14 +75,15 @@ func TestDirectoryPaginates(t *testing.T) {
 		t.Errorf("paged names = %v", all)
 	}
 
-	if status, _, _ := listAuthGroups(t, s, "limit=x"); status != http.StatusBadRequest {
-		t.Errorf("bad limit: status = %d, want 400", status)
+	for _, limit := range []string{"0", "x"} {
+		if status, items, next := listAuthGroups(t, s, "limit="+limit); status != http.StatusOK || len(items) != 5 || next != "" {
+			t.Errorf("limit=%s should use the default page size, got %d: %d items next=%q", limit, status, len(items), next)
+		}
 	}
-	if _, items, _ := listAuthGroups(t, s, "cursor=zzz"); len(items) != 0 {
-		t.Errorf("cursor past the end should give an empty page, got %v", items)
-	}
-	if _, items, next := listAuthGroups(t, s, "limit=0"); len(items) != 5 || next != "" {
-		t.Errorf("limit=0 should use the default page size, got %d items next=%q", len(items), next)
+	// authcommon binds cursors to this provider, the filter, and the limit, so
+	// a cursor it did not mint is rejected and Obot restarts from the top.
+	if status, _, _ := listAuthGroups(t, s, "cursor=zzz"); status != http.StatusBadRequest {
+		t.Errorf("forged cursor: status = %d, want 400", status)
 	}
 }
 
@@ -91,7 +92,7 @@ func TestDirectoryDropsOldestSeenGroupsButKeepsDeclared(t *testing.T) {
 	for i := 0; i < maxSeenGroups+5; i++ {
 		d.remember([]string{"g" + strings.Repeat("x", i%7) + string(rune('a'+i%26)) + strings.Repeat("y", i/26)})
 	}
-	items, _ := d.list("", maxListLimit, "")
+	items, _ := d.list("", maxSeenGroups+1, "")
 	if len(d.names) > maxSeenGroups+1 {
 		t.Errorf("directory holds %d names, want at most %d", len(d.names), maxSeenGroups+1)
 	}
@@ -110,7 +111,7 @@ func TestGetAuthGroupsResolvesIDsInNamespace(t *testing.T) {
 	s := newTestServer(t, "", time.Minute)
 	req := httptest.NewRequest(http.MethodGet, "/obot-get-auth-groups?ids=pingfederate%2FLDAP-Obot-Admins,other%2Fx,pingfederate%2F,%20pingfederate%2Fdevs%20", nil)
 	rec := httptest.NewRecorder()
-	s.getAuthGroups(rec, req)
+	s.handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}

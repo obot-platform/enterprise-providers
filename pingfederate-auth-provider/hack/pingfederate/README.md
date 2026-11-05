@@ -60,9 +60,13 @@ registry, after `make build` here:
 
 ```sh
 OBOT_SERVER_ENABLE_AUTHENTICATION=true \
-OBOT_SERVER_PROVIDER_REGISTRIES=/path/to/providers \
+OBOT_SERVER_PROVIDER_REGISTRIES=/path/to/enterprise-providers \
 make dev
 ```
+
+PingFederate is an enterprise auth provider, so Obot asks you to register
+Obot Community (free) or add an Enterprise license before it can be
+configured.
 
 In **Identity & Access > Auth Providers**, configure **PingFederate** with:
 

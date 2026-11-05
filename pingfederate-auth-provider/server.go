@@ -15,17 +15,21 @@ import (
 	oauth2proxy "github.com/oauth2-proxy/oauth2-proxy/v7"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/validation"
+	"github.com/obot-platform/enterprise-providers/authcommon"
+	"github.com/obot-platform/enterprise-providers/pingfederate-auth-provider/pkg/oidc"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
-	"github.com/obot-platform/providers/pingfederate-auth-provider/pkg/oidc"
 )
 
 const (
 	providerName = "pingfederate-auth-provider"
 
+	// providerKind names this provider to authcommon, which binds group
+	// listing cursors to it and strips it, as a prefix, from group IDs.
+	providerKind = "pingfederate"
 	// groupIDPrefix namespaces the group IDs this provider reports. Obot
 	// rejects groups outside the prefix declared in the manifest, so this
 	// constant and the manifest's groupIDPrefix must agree.
-	groupIDPrefix = "pingfederate/"
+	groupIDPrefix = providerKind + "/"
 
 	cacheSize    = 10000
 	cacheTTL     = 24 * time.Hour
@@ -173,8 +177,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/obot-get-state", s.getState)
 	mux.HandleFunc("/obot-get-user-info", s.getUserInfo)
 	mux.HandleFunc("/obot-list-user-auth-groups", s.listUserAuthGroups)
-	mux.HandleFunc("/obot-list-auth-groups", s.listAuthGroups)
-	mux.HandleFunc("/obot-get-auth-groups", s.getAuthGroups)
+	mux.HandleFunc("/obot-list-auth-groups", authcommon.ListGroupsHandler(providerKind, s.fetchGroupPage))
+	mux.HandleFunc("/obot-get-auth-groups", authcommon.GetGroupsHandler(providerKind, s.fetchGroupsByIDs))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/obot-") {
 			// An Obot-internal endpoint this provider does not know must not

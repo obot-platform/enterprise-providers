@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/obot-platform/enterprise-providers/pingfederate-auth-provider/internal/mockidp"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
-	"github.com/obot-platform/providers/pingfederate-auth-provider/internal/mockidp"
 )
 
 // These tests run the whole provider against a mock OpenID Connect identity

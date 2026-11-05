@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/obot-platform/providers/pingfederate-auth-provider/internal/mockidp"
+	"github.com/obot-platform/enterprise-providers/pingfederate-auth-provider/internal/mockidp"
 )
 
 func main() {

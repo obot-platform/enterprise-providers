@@ -1,16 +1,17 @@
-module github.com/obot-platform/providers/pingfederate-auth-provider
+module github.com/obot-platform/enterprise-providers/pingfederate-auth-provider
 
 go 1.27
 
 replace (
-	github.com/oauth2-proxy/oauth2-proxy/v7 => github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20260718004156-5704f042a6ff
-	github.com/obot-platform/providers/auth-providers-common => ../auth-providers-common
+	github.com/oauth2-proxy/oauth2-proxy/v7 => github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20261104175339-03f2911511be
+	github.com/obot-platform/enterprise-providers/authcommon => ../authcommon
 )
 
 require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
-	github.com/obot-platform/providers/auth-providers-common v0.0.0-20241008222508-3c6174b443e7
+	github.com/obot-platform/enterprise-providers/authcommon v0.0.0
+	github.com/obot-platform/providers/auth-providers-common v0.0.0-20261105175221-d62ef1d5bdc1
 )
 
 require (
@@ -26,12 +27,10 @@ require (
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
-	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.8 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/s2a-go v0.1.10 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.22 // indirect
@@ -80,5 +79,4 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
 	gorm.io/gorm v1.31.1 // indirect
-	k8s.io/apimachinery v0.35.3 // indirect
 )

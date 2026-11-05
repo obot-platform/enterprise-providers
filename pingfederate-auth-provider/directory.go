@@ -1,22 +1,16 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"net/http"
+	"context"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
 
-const (
-	defaultListLimit = 50
-	maxListLimit     = 500
-	maxSeenGroups    = 10000
-)
+const maxSeenGroups = 10000
 
 // groupDirectory stands in for the group directory PingFederate does not
 // expose. It holds the groups an administrator declared up front, so they can
@@ -100,47 +94,18 @@ func (d *groupDirectory) list(filter string, limit int, cursor string) (state.Gr
 	return page, next
 }
 
-// listAuthGroups serves Obot's group search, which backs the group picker in
-// the admin UI: GET /obot-list-auth-groups?name=<filter>&limit=<n>&cursor=<c>.
-func (s *server) listAuthGroups(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	limit := defaultListLimit
-	if raw := q.Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 {
-			http.Error(w, "limit must be a non-negative integer", http.StatusBadRequest)
-			return
-		}
-		if parsed > 0 {
-			limit = min(parsed, maxListLimit)
-		}
-	}
-	items, next := s.directory.list(q.Get("name"), limit, q.Get("cursor"))
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(struct {
-		Items      state.GroupInfoList `json:"items"`
-		NextCursor string              `json:"nextCursor,omitempty"`
-	}{items, next}); err != nil {
-		http.Error(w, fmt.Sprintf("failed to encode groups: %v", err), http.StatusInternalServerError)
-	}
+// fetchGroupPage returns one page of the directory for authcommon's
+// ListGroupsHandler, which serves Obot's group search behind the group picker.
+// The continuation token is the last name of the previous page.
+func (s *server) fetchGroupPage(_ context.Context, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	items, next := s.directory.list(req.NameFilter, req.Limit, req.Cursor)
+	return authcommon.PageResult{Items: items, NextCursor: next}, nil
 }
 
-// getAuthGroups resolves group IDs to groups: GET /obot-get-auth-groups?ids=a,b.
-// A group's name is its ID without the prefix, so every ID in this provider's
-// namespace resolves, whether or not it has been seen.
-func (s *server) getAuthGroups(w http.ResponseWriter, r *http.Request) {
-	var names []string
-	for _, id := range strings.Split(r.URL.Query().Get("ids"), ",") {
-		if name, ok := strings.CutPrefix(strings.TrimSpace(id), groupIDPrefix); ok && name != "" {
-			names = append(names, name)
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(struct {
-		Items state.GroupInfoList `json:"items"`
-	}{groupInfos(names)}); err != nil {
-		http.Error(w, fmt.Sprintf("failed to encode groups: %v", err), http.StatusInternalServerError)
-	}
+// fetchGroupsByIDs resolves group IDs for authcommon's GetGroupsHandler. A
+// group's name is its ID without the prefix, which authcommon has already
+// removed, so every ID in this provider's namespace resolves, whether or not
+// it has been seen.
+func (s *server) fetchGroupsByIDs(_ context.Context, names []string) (state.GroupInfoList, error) {
+	return groupInfos(names), nil
 }
