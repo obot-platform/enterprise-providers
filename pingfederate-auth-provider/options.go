@@ -99,7 +99,7 @@ func (o Options) resolve() (*settings, error) {
 
 	s.scopes = normalizeScopes(o.Scopes)
 
-	s.knownGroups = splitLines(o.KnownGroups)
+	s.knownGroups = splitLines(unescapeMultiline(o.KnownGroups))
 	s.emailDomains = splitList(o.AuthEmailDomains)
 	if len(s.emailDomains) == 0 {
 		return nil, fmt.Errorf("allowed email domains must not be empty (use * to allow any domain)")
@@ -130,7 +130,7 @@ func (o Options) resolve() (*settings, error) {
 	}
 
 	// Last, so that no earlier validation failure leaves a temporary file behind.
-	if s.caFiles, s.tempFiles, err = resolveCAFiles(o.CAFile, o.CACertificate); err != nil {
+	if s.caFiles, s.tempFiles, err = resolveCAFiles(o.CAFile, unescapeMultiline(o.CACertificate)); err != nil {
 		return nil, err
 	}
 
@@ -179,6 +179,13 @@ func normalizeScopes(value string) string {
 		}
 	}
 	return strings.Join(scopes, " ")
+}
+
+// unescapeMultiline restores the line breaks in a value from a multi-line
+// field of Obot's admin UI, which saves each line break as the two characters
+// backslash and n.
+func unescapeMultiline(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, `\r\n`, "\n"), `\n`, "\n")
 }
 
 // splitLines accepts one entry per line or comma-separated entries, so a

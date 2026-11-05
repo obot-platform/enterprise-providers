@@ -208,3 +208,36 @@ func TestLoadOptionsFromEnvironment(t *testing.T) {
 		t.Errorf("defaults not applied: %+v", s.Options)
 	}
 }
+
+// Obot's admin UI saves each line break in a multi-line field as a literal
+// backslash and n.
+func TestResolveUnescapesMultilineFields(t *testing.T) {
+	pemText := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+	for name, encode := range map[string]func(string) string{
+		"as saved by the admin UI": func(s string) string { return strings.ReplaceAll(s, "\n", `\n`) },
+		"with Windows line breaks": func(s string) string { return strings.ReplaceAll(s, "\n", `\r\n`) },
+		"with real line breaks":    func(s string) string { return s },
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := validOptions()
+			o.CACertificate = encode(pemText)
+			o.KnownGroups = encode("admins\nengineering, sales")
+			s, err := o.resolve()
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			t.Cleanup(s.cleanup)
+
+			content, err := os.ReadFile(s.caFiles[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(content)); got != pemText {
+				t.Errorf("CA file content = %q, want %q", got, pemText)
+			}
+			if got := strings.Join(s.knownGroups, "|"); got != "admins|engineering|sales" {
+				t.Errorf("knownGroups = %q", got)
+			}
+		})
+	}
+}

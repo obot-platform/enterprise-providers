@@ -686,6 +686,14 @@ func TestPrivateCA(t *testing.T) {
 		}
 	})
 
+	t.Run("CA as PEM text saved by the admin UI", func(t *testing.T) {
+		// The admin UI saves each line break in a multi-line field as a
+		// literal backslash and n.
+		p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_CERTIFICATE": strings.ReplaceAll(caPEM, "\n", `\n`)})
+		p.mustLogin(t)
+		p.srv.cfg.cleanup()
+	})
+
 	t.Run("CA as file", func(t *testing.T) {
 		caFile := filepath.Join(t.TempDir(), "ca.pem")
 		if err := os.WriteFile(caFile, []byte(caPEM), 0o600); err != nil {
