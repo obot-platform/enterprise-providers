@@ -82,16 +82,12 @@ type testProvider struct {
 var providerEnv = []string{
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_ID", "OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_SECRET",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_ISSUER_URL", "OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES",
-	"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM", "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE",
+	"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM", "OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS",
-	"OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL", "OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD",
-	"OBOT_PINGFEDERATE_AUTH_PROVIDER_EXTRA_AUDIENCES", "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_ISSUER_VERIFICATION",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_CERTIFICATE", "OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_FILE",
-	"OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_DISCOVERY", "OBOT_PINGFEDERATE_AUTH_PROVIDER_AUTHORIZATION_URL",
-	"OBOT_PINGFEDERATE_AUTH_PROVIDER_TOKEN_URL", "OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_URL",
-	"OBOT_PINGFEDERATE_AUTH_PROVIDER_JWKS_URL", "OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL",
+	"OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL",
 	"OBOT_SERVER_PUBLIC_URL", "OBOT_SERVER_URL", "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN",
 	"OBOT_AUTH_PROVIDER_POSTGRES_MAX_CONNECTIONS", "OBOT_AUTH_PROVIDER_POSTGRES_MAX_IDLE_CONNECTIONS",
 	"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_LIFETIME_SECONDS", "OBOT_AUTH_PROVIDER_COOKIE_SECRET",
@@ -593,21 +589,14 @@ func TestUnverifiedEmail(t *testing.T) {
 	user.EmailVerified = &unverified
 	idp.SetUser(user)
 
-	t.Run("allowed when enabled", func(t *testing.T) {
-		p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL": "true"})
-		p.mustLogin(t)
-	})
-
-	t.Run("rejected by default", func(t *testing.T) {
-		p := mustStartProvider(t, idp.Issuer(), nil)
-		resp := p.login(t)
-		if resp.StatusCode == http.StatusFound && resp.Header.Get("Location") == "/after-login" {
-			t.Fatal("login with an unverified email should have failed")
-		}
-		if p.sessionCookie() != nil {
-			t.Error("a session cookie was set despite the failed login")
-		}
-	})
+	p := mustStartProvider(t, idp.Issuer(), nil)
+	resp := p.login(t)
+	if resp.StatusCode == http.StatusFound && resp.Header.Get("Location") == "/after-login" {
+		t.Fatal("login with an unverified email should have failed")
+	}
+	if p.sessionCookie() != nil {
+		t.Error("a session cookie was set despite the failed login")
+	}
 }
 
 func TestEmailDomainRestriction(t *testing.T) {
@@ -620,18 +609,6 @@ func TestEmailDomainRestriction(t *testing.T) {
 	}
 	if p.sessionCookie() != nil {
 		t.Error("a session cookie was set despite the failed login")
-	}
-}
-
-func TestPKCEDisabled(t *testing.T) {
-	cfg := defaultIDPConfig()
-	cfg.RequirePKCE = false
-	idp := startIDP(t, cfg, false)
-	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD": "none"})
-
-	p.mustLogin(t)
-	if a := idp.Authorizations()[0]; a.CodeChallenge != "" || a.CodeChallengeMethod != "" {
-		t.Errorf("PKCE parameters sent although disabled: %+v", a)
 	}
 }
 
@@ -660,35 +637,18 @@ func TestCustomScopesAndClaims(t *testing.T) {
 	}
 }
 
-func TestSkipNonce(t *testing.T) {
+// oauth2-proxy's legacy options skip nonce verification by default, so the
+// provider turns it on explicitly; a nonce in the authorization request shows
+// that it did.
+func TestNonceIsSent(t *testing.T) {
 	idp := startIDP(t, defaultIDPConfig(), false)
-	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE": "true"})
+	p := mustStartProvider(t, idp.Issuer(), nil)
 
 	p.mustLogin(t)
-	if a := idp.Authorizations()[0]; a.Nonce != "" {
-		t.Errorf("nonce sent although verification is skipped: %+v", a)
+	if a := idp.Authorizations()[0]; a.Nonce == "" {
+		t.Errorf("no nonce in the authorization request: %+v", a)
 	}
 	p.mustGetState(t)
-}
-
-func TestSkipDiscovery(t *testing.T) {
-	idp := startIDP(t, defaultIDPConfig(), false)
-	p := mustStartProvider(t, idp.Issuer(), map[string]string{
-		"OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_DISCOVERY":    "true",
-		"OBOT_PINGFEDERATE_AUTH_PROVIDER_AUTHORIZATION_URL": idp.Issuer() + mockidp.AuthorizePath,
-		"OBOT_PINGFEDERATE_AUTH_PROVIDER_TOKEN_URL":         idp.Issuer() + mockidp.TokenPath,
-		"OBOT_PINGFEDERATE_AUTH_PROVIDER_JWKS_URL":          idp.Issuer() + mockidp.JWKSPath,
-		"OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_URL":      idp.Issuer() + mockidp.UserinfoPath,
-	})
-
-	p.mustLogin(t)
-	if idp.Counts().Discovery != 0 {
-		t.Errorf("discovery document fetched %d times, want 0", idp.Counts().Discovery)
-	}
-	ss := p.mustGetState(t)
-	if status, profile := p.userInfo(t, ss.AccessToken); status != http.StatusOK || profile["id"] != "sub-ada" {
-		t.Errorf("user info = %d %v", status, profile)
-	}
 }
 
 func TestIssuerMismatchIsReported(t *testing.T) {
@@ -698,9 +658,6 @@ func TestIssuerMismatchIsReported(t *testing.T) {
 	if _, err := startProvider(t, idp.Issuer()+"/", nil); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Errorf("expected an issuer mismatch error, got %v", err)
 	}
-
-	p := mustStartProvider(t, idp.Issuer()+"/", map[string]string{"OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_ISSUER_VERIFICATION": "true"})
-	p.mustLogin(t)
 }
 
 func TestPrivateCA(t *testing.T) {

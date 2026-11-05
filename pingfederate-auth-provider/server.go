@@ -62,24 +62,19 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 		return nil, err
 	}
 
-	userinfoURL := strings.TrimSpace(cfg.UserinfoURL)
-	if !cfg.skipDiscovery {
-		discovery, err := oidc.Discover(ctx, httpClient, cfg.issuerURL)
-		if err != nil {
-			return nil, fmt.Errorf("OIDC discovery failed for issuer %s: %w", cfg.issuerURL, err)
-		}
-		if !cfg.skipIssuerVerification && discovery.Issuer != cfg.issuerURL {
-			return nil, fmt.Errorf("the discovery document reports issuer %q, which does not match the configured issuer URL %q; use the reported value, or enable skipping issuer verification", discovery.Issuer, cfg.issuerURL)
-		}
-		if userinfoURL == "" {
-			userinfoURL = discovery.UserinfoEndpoint
-		}
+	discovery, err := oidc.Discover(ctx, httpClient, cfg.issuerURL)
+	if err != nil {
+		return nil, fmt.Errorf("OIDC discovery failed for issuer %s: %w", cfg.issuerURL, err)
 	}
+	if discovery.Issuer != cfg.issuerURL {
+		return nil, fmt.Errorf("the discovery document reports issuer %q, which does not match the configured issuer URL %q; set the issuer URL to the reported value", discovery.Issuer, cfg.issuerURL)
+	}
+	userinfoURL := discovery.UserinfoEndpoint
 	if userinfoURL == "" {
-		slog.Warn("no userinfo endpoint is configured or discovered; user profiles will be read from ID token claims only")
+		slog.Warn("the discovery document has no userinfo endpoint; user profiles will be read from ID token claims only")
 	}
 
-	proxy, err := newOAuthProxy(cfg, userinfoURL)
+	proxy, err := newOAuthProxy(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +99,7 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 // PingFederate. Everything Obot-specific (cookie name, redirect URL, session
 // store) mirrors the other Obot auth providers so the gateway treats this one
 // the same way.
-func newOAuthProxy(cfg *settings, userinfoURL string) (*oauth2proxy.OAuthProxy, error) {
+func newOAuthProxy(cfg *settings) (*oauth2proxy.OAuthProxy, error) {
 	legacyOpts := options.NewLegacyOptions()
 	provider := &legacyOpts.LegacyProvider
 	provider.ProviderType = "oidc"
@@ -120,21 +115,17 @@ func newOAuthProxy(cfg *settings, userinfoURL string) (*oauth2proxy.OAuthProxy, 
 	// option is deliberately left alone, because setting it to anything but
 	// "email" silently redefines the email claim as well.
 	provider.OIDCGroupsClaim = cfg.GroupsClaim
-	provider.InsecureOIDCAllowUnverifiedEmail = cfg.allowUnverifiedEmail
-	provider.InsecureOIDCSkipIssuerVerification = cfg.skipIssuerVerification
-	provider.InsecureOIDCSkipNonce = cfg.skipNonce
-	provider.OIDCExtraAudiences = cfg.extraAudiences
-	provider.CodeChallengeMethod = cfg.codeChallengeMethod
+	// PingFederate is a certified OpenID provider: it echoes the nonce,
+	// advertises its issuer, and supports S256 PKCE, so none of these checks
+	// is configurable. They are set explicitly because oauth2-proxy's legacy
+	// defaults skip nonce verification.
+	provider.InsecureOIDCAllowUnverifiedEmail = false
+	provider.InsecureOIDCSkipIssuerVerification = false
+	provider.InsecureOIDCSkipNonce = false
+	provider.CodeChallengeMethod = "S256"
 	if len(cfg.caFiles) > 0 {
 		provider.ProviderCAFiles = cfg.caFiles
 		provider.UseSystemTrustStore = true
-	}
-	if cfg.skipDiscovery {
-		provider.SkipOIDCDiscovery = true
-		provider.LoginURL = strings.TrimSpace(cfg.AuthorizationURL)
-		provider.RedeemURL = strings.TrimSpace(cfg.TokenURL)
-		provider.OIDCJwksURL = strings.TrimSpace(cfg.JWKSURL)
-		provider.ProfileURL = userinfoURL
 	}
 
 	opts, err := legacyOpts.ToOptions()

@@ -15,10 +15,6 @@ func validOptions() Options {
 		Scopes:                   "openid email profile",
 		EmailClaim:               "email",
 		GroupsClaim:              "groups",
-		AllowUnverifiedEmail:     "false",
-		CodeChallengeMethod:      "S256",
-		SkipIssuerVerification:   "false",
-		SkipDiscovery:            "false",
 		UserinfoCacheTTL:         "5m",
 		ObotServerURL:            "https://obot.example.com",
 		AuthCookieSecret:         base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32))),
@@ -32,11 +28,8 @@ func TestResolveDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if s.allowUnverifiedEmail || s.skipIssuerVerification || s.skipDiscovery || s.skipNonce || s.loggingEnabled {
-		t.Errorf("unexpected booleans: %+v", s)
-	}
-	if s.codeChallengeMethod != "S256" {
-		t.Errorf("codeChallengeMethod = %q", s.codeChallengeMethod)
+	if s.loggingEnabled {
+		t.Error("logging should be off by default")
 	}
 	if s.scopes != "openid email profile" {
 		t.Errorf("scopes = %q", s.scopes)
@@ -75,43 +68,14 @@ func TestResolveNormalizesScopes(t *testing.T) {
 	}
 }
 
-func TestResolveCodeChallengeMethod(t *testing.T) {
-	cases := map[string]string{"S256": "S256", "s256": "S256", "none": "", "NONE": "", "disabled": ""}
-	for in, want := range cases {
-		o := validOptions()
-		o.CodeChallengeMethod = in
-		s, err := o.resolve()
-		if err != nil {
-			t.Fatalf("resolve(%q): %v", in, err)
-		}
-		if s.codeChallengeMethod != want {
-			t.Errorf("codeChallengeMethod(%q) = %q, want %q", in, s.codeChallengeMethod, want)
-		}
-	}
-	o := validOptions()
-	o.CodeChallengeMethod = "sha1"
-	if _, err := o.resolve(); err == nil {
-		t.Error("expected an error for an unsupported code challenge method")
-	}
-}
-
 func TestResolveRejectsBadValues(t *testing.T) {
 	cases := map[string]func(*Options){
-		"empty issuer":       func(o *Options) { o.IssuerURL = "" },
-		"relative issuer":    func(o *Options) { o.IssuerURL = "sso.example.com" },
-		"ftp issuer":         func(o *Options) { o.IssuerURL = "ftp://sso.example.com" },
-		"empty client id":    func(o *Options) { o.ClientID = " " },
-		"empty server url":   func(o *Options) { o.ObotServerURL = "" },
-		"bad bool":           func(o *Options) { o.AllowUnverifiedEmail = "maybe" },
-		"bad skip discovery": func(o *Options) { o.SkipDiscovery = "sometimes" },
-		"bad logging":        func(o *Options) { o.LoggingEnabled = "verbose" },
-		"skip discovery without urls": func(o *Options) {
-			o.SkipDiscovery = "true"
-			o.AuthorizationURL = "https://sso.example.com/as/authorization.oauth2"
-			o.TokenURL = "https://sso.example.com/as/token.oauth2"
-		},
-		"bad token url":             func(o *Options) { o.TokenURL = "nope" },
-		"bad userinfo url":          func(o *Options) { o.UserinfoURL = "/idp/userinfo.openid" },
+		"empty issuer":              func(o *Options) { o.IssuerURL = "" },
+		"relative issuer":           func(o *Options) { o.IssuerURL = "sso.example.com" },
+		"ftp issuer":                func(o *Options) { o.IssuerURL = "ftp://sso.example.com" },
+		"empty client id":           func(o *Options) { o.ClientID = " " },
+		"empty server url":          func(o *Options) { o.ObotServerURL = "" },
+		"bad logging":               func(o *Options) { o.LoggingEnabled = "verbose" },
 		"empty email domains":       func(o *Options) { o.AuthEmailDomains = " , " },
 		"cookie secret not base64":  func(o *Options) { o.AuthCookieSecret = "***" },
 		"cookie secret wrong size":  func(o *Options) { o.AuthCookieSecret = base64.StdEncoding.EncodeToString([]byte("short")) },
@@ -128,21 +92,6 @@ func TestResolveRejectsBadValues(t *testing.T) {
 		if _, err := o.resolve(); err == nil {
 			t.Errorf("%s: expected an error", name)
 		}
-	}
-}
-
-func TestResolveSkipDiscoveryWithEndpoints(t *testing.T) {
-	o := validOptions()
-	o.SkipDiscovery = "true"
-	o.AuthorizationURL = "https://sso.example.com/as/authorization.oauth2"
-	o.TokenURL = "https://sso.example.com/as/token.oauth2"
-	o.JWKSURL = "https://sso.example.com/pf/JWKS"
-	s, err := o.resolve()
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if !s.skipDiscovery {
-		t.Error("skipDiscovery should be set")
 	}
 }
 
@@ -178,14 +127,6 @@ func TestResolveCACertificateWritesProtectedFile(t *testing.T) {
 	s.cleanup()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("cleanup left %s behind: %v", path, err)
-	}
-}
-
-func TestResolvePlainPKCEIsRejected(t *testing.T) {
-	o := validOptions()
-	o.CodeChallengeMethod = "plain"
-	if _, err := o.resolve(); err == nil {
-		t.Error("plain PKCE should be rejected")
 	}
 }
 
@@ -225,16 +166,12 @@ func TestResolveCAFileAndCertificateTogether(t *testing.T) {
 	}
 }
 
-func TestResolveExtraAudiencesAndEmailDomains(t *testing.T) {
+func TestResolveEmailDomains(t *testing.T) {
 	o := validOptions()
-	o.ExtraAudiences = "api://obot, https://other "
 	o.AuthEmailDomains = "example.com , example.org"
 	s, err := o.resolve()
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
-	}
-	if strings.Join(s.extraAudiences, "|") != "api://obot|https://other" {
-		t.Errorf("extraAudiences = %v", s.extraAudiences)
 	}
 	if strings.Join(s.emailDomains, "|") != "example.com|example.org" {
 		t.Errorf("emailDomains = %v", s.emailDomains)
@@ -267,7 +204,7 @@ func TestLoadOptionsFromEnvironment(t *testing.T) {
 	if s.issuerURL != "https://sso.example.com" || s.GroupsClaim != "memberOf" || !s.loggingEnabled {
 		t.Errorf("unexpected settings: issuer=%q groups=%q logging=%v", s.issuerURL, s.GroupsClaim, s.loggingEnabled)
 	}
-	if s.EmailClaim != "email" || s.scopes != "openid email profile" || s.codeChallengeMethod != "S256" || s.skipNonce {
+	if s.EmailClaim != "email" || s.scopes != "openid email profile" {
 		t.Errorf("defaults not applied: %+v", s.Options)
 	}
 }

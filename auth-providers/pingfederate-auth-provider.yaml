@@ -61,46 +61,6 @@ optionalConfigurationParameters:
     description: "${pingfederate_auth_provider_known_groups_description}"
     sensitive: false
     multiline: true
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL"
-    friendlyName: "${pingfederate_auth_provider_allow_unverified_email_friendly_name}"
-    description: "${pingfederate_auth_provider_allow_unverified_email_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD"
-    friendlyName: "${pingfederate_auth_provider_code_challenge_method_friendly_name}"
-    description: "${pingfederate_auth_provider_code_challenge_method_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE"
-    friendlyName: "${pingfederate_auth_provider_skip_nonce_friendly_name}"
-    description: "${pingfederate_auth_provider_skip_nonce_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_EXTRA_AUDIENCES"
-    friendlyName: "${pingfederate_auth_provider_extra_audiences_friendly_name}"
-    description: "${pingfederate_auth_provider_extra_audiences_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_ISSUER_VERIFICATION"
-    friendlyName: "${pingfederate_auth_provider_skip_issuer_verification_friendly_name}"
-    description: "${pingfederate_auth_provider_skip_issuer_verification_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_DISCOVERY"
-    friendlyName: "${pingfederate_auth_provider_skip_discovery_friendly_name}"
-    description: "${pingfederate_auth_provider_skip_discovery_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_AUTHORIZATION_URL"
-    friendlyName: "${pingfederate_auth_provider_authorization_url_friendly_name}"
-    description: "${pingfederate_auth_provider_authorization_url_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_TOKEN_URL"
-    friendlyName: "${pingfederate_auth_provider_token_url_friendly_name}"
-    description: "${pingfederate_auth_provider_token_url_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_JWKS_URL"
-    friendlyName: "${pingfederate_auth_provider_jwks_url_friendly_name}"
-    description: "${pingfederate_auth_provider_jwks_url_description}"
-    sensitive: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_URL"
-    friendlyName: "${pingfederate_auth_provider_userinfo_url_friendly_name}"
-    description: "${pingfederate_auth_provider_userinfo_url_description}"
-    sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL"
     friendlyName: "${pingfederate_auth_provider_userinfo_cache_ttl_friendly_name}"
     description: "${pingfederate_auth_provider_userinfo_cache_ttl_description}"

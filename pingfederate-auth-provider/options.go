@@ -23,25 +23,15 @@ type Options struct {
 	ClientSecret string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_SECRET"`
 	IssuerURL    string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_ISSUER_URL"`
 
-	Scopes                 string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES" default:"openid email profile"`
-	NameClaim              string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM" default:"name"`
-	EmailClaim             string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM" default:"email"`
-	GroupsClaim            string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM" default:"groups"`
-	GroupsDelimiter        string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER" optional:"true"`
-	KnownGroups            string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS" optional:"true"`
-	AllowUnverifiedEmail   string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL" default:"false"`
-	CodeChallengeMethod    string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD" default:"S256"`
-	SkipNonce              string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE" default:"false"`
-	ExtraAudiences         string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_EXTRA_AUDIENCES" optional:"true"`
-	SkipIssuerVerification string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_ISSUER_VERIFICATION" default:"false"`
-	CACertificate          string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_CERTIFICATE" optional:"true"`
-	CAFile                 string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_FILE" optional:"true"`
-	SkipDiscovery          string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_DISCOVERY" default:"false"`
-	AuthorizationURL       string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_AUTHORIZATION_URL" optional:"true"`
-	TokenURL               string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_TOKEN_URL" optional:"true"`
-	UserinfoURL            string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_URL" optional:"true"`
-	JWKSURL                string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_JWKS_URL" optional:"true"`
-	UserinfoCacheTTL       string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL" default:"5m"`
+	Scopes           string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES" default:"openid email profile"`
+	NameClaim        string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM" default:"name"`
+	EmailClaim       string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM" default:"email"`
+	GroupsClaim      string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM" default:"groups"`
+	GroupsDelimiter  string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER" optional:"true"`
+	KnownGroups      string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS" optional:"true"`
+	CACertificate    string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_CERTIFICATE" optional:"true"`
+	CAFile           string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_FILE" optional:"true"`
+	UserinfoCacheTTL string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL" default:"5m"`
 
 	ObotServerURL                     string `env:"OBOT_SERVER_PUBLIC_URL,OBOT_SERVER_URL"`
 	PostgresConnectionDSN             string `env:"OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN" optional:"true"`
@@ -59,22 +49,16 @@ type Options struct {
 type settings struct {
 	Options
 
-	issuerURL              string
-	scopes                 string
-	allowUnverifiedEmail   bool
-	skipIssuerVerification bool
-	skipNonce              bool
-	skipDiscovery          bool
-	codeChallengeMethod    string // "" disables PKCE
-	extraAudiences         []string
-	knownGroups            []string
-	caFiles                []string
-	tempFiles              []string // files created by resolve, removed by cleanup
-	cookieSecret           string
-	emailDomains           []string
-	refreshDuration        time.Duration
-	userinfoCacheTTL       time.Duration
-	loggingEnabled         bool
+	issuerURL        string
+	scopes           string
+	knownGroups      []string
+	caFiles          []string
+	tempFiles        []string // files created by resolve, removed by cleanup
+	cookieSecret     string
+	emailDomains     []string
+	refreshDuration  time.Duration
+	userinfoCacheTTL time.Duration
+	loggingEnabled   bool
 }
 
 func loadOptions() (*settings, error) {
@@ -109,52 +93,12 @@ func (o Options) resolve() (*settings, error) {
 		return nil, fmt.Errorf("obot server URL must not be empty")
 	}
 
-	if s.allowUnverifiedEmail, err = parseBool("allow unverified email", o.AllowUnverifiedEmail); err != nil {
-		return nil, err
-	}
-	if s.skipIssuerVerification, err = parseBool("skip issuer verification", o.SkipIssuerVerification); err != nil {
-		return nil, err
-	}
-	if s.skipNonce, err = parseBool("skip nonce verification", o.SkipNonce); err != nil {
-		return nil, err
-	}
-	if s.skipDiscovery, err = parseBool("skip discovery", o.SkipDiscovery); err != nil {
-		return nil, err
-	}
 	if s.loggingEnabled, err = parseBool("enable logging", o.LoggingEnabled); err != nil {
 		return nil, err
 	}
 
-	if s.codeChallengeMethod, err = normalizeCodeChallengeMethod(o.CodeChallengeMethod); err != nil {
-		return nil, err
-	}
 	s.scopes = normalizeScopes(o.Scopes)
 
-	if s.skipDiscovery {
-		for name, value := range map[string]string{
-			"authorization URL": o.AuthorizationURL,
-			"token URL":         o.TokenURL,
-			"JWKS URL":          o.JWKSURL,
-		} {
-			if strings.TrimSpace(value) == "" {
-				return nil, fmt.Errorf("%s is required when OIDC discovery is skipped", name)
-			}
-		}
-	}
-	for name, value := range map[string]string{
-		"authorization URL": o.AuthorizationURL,
-		"token URL":         o.TokenURL,
-		"userinfo URL":      o.UserinfoURL,
-		"JWKS URL":          o.JWKSURL,
-	} {
-		if strings.TrimSpace(value) != "" {
-			if err := validateHTTPURL(name, strings.TrimSpace(value)); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	s.extraAudiences = splitList(o.ExtraAudiences)
 	s.knownGroups = splitLines(o.KnownGroups)
 	s.emailDomains = splitList(o.AuthEmailDomains)
 	if len(s.emailDomains) == 0 {
@@ -220,22 +164,6 @@ func parseBool(name, value string) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("%s must be true or false, got %q", name, value)
-	}
-}
-
-// normalizeCodeChallengeMethod maps the configured PKCE method to what
-// oauth2-proxy expects. "none" (or empty) turns PKCE off for an authorization
-// server that rejects unexpected code_challenge parameters. The "plain" method
-// is not offered: it protects nothing that S256 does not, and PingFederate
-// supports S256.
-func normalizeCodeChallengeMethod(value string) (string, error) {
-	switch strings.ToUpper(strings.TrimSpace(value)) {
-	case "", "NONE", "OFF", "DISABLED":
-		return "", nil
-	case "S256":
-		return "S256", nil
-	default:
-		return "", fmt.Errorf("code challenge method must be S256 or none, got %q", value)
 	}
 }
 

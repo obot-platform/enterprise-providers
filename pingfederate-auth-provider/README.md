@@ -18,9 +18,8 @@ profile, and list their groups.
      `https://obot.example.com/`. Obot receives the callback at its root and
      forwards it to the provider; `/oauth2/callback` is not what PingFederate
      calls.
-   - PKCE: optional in PingFederate. The provider sends an `S256` code
-     challenge by default; if the client is configured to reject PKCE, set the
-     PKCE method to `none`.
+   - PKCE: the provider always sends an `S256` code challenge, so you can
+     turn on **Require Proof Key for Code Exchange (PKCE)** for the client.
    - OpenID Connect policy: release `sub`, `email`, `name` (or `given_name`
      and `family_name`), `preferred_username`, and, for group-based access
      control in Obot, a group membership attribute (`groups` by default).
@@ -44,9 +43,8 @@ profile, and list their groups.
 - The email address comes from the `email` claim (configurable). Logins are
   accepted when the ID token does not carry `email_verified`, which
   PingFederate typically omits. An explicit `email_verified: false` is
-  rejected unless **Allow Unverified Email** is turned on, because an
-  unverified address would otherwise satisfy the allowed email domains. The
-  check applies only when the email claim is `email`.
+  rejected, because an unverified address would otherwise satisfy the allowed
+  email domains. The check applies only when the email claim is `email`.
 - **Name Claim** chooses the claim shown in **Identity & Access → Users → Name**
   (default: `name`). If missing, the provider falls back to `name`, then
   `given_name` + `family_name`, then `preferred_username`, then the email.
@@ -93,6 +91,14 @@ in memory:
   information for a user is forgotten after 24 hours without a request from
   that user.
 
+## Security checks
+
+PingFederate is a certified OpenID provider, so the provider applies the
+standard OpenID Connect checks and none of them can be turned off: it reads
+the discovery document, requires its `issuer` to match the configured issuer
+URL, sends and verifies a nonce, uses `S256` PKCE, accepts ID tokens only for
+the client ID, and rejects an explicit `email_verified: false`.
+
 ## Configuration
 
 All settings are environment variables; Obot passes the values entered in the
@@ -118,16 +124,6 @@ Optional (defaults in parentheses):
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM` | Groups claim (`groups`) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER` | Delimiter when groups arrive as one string (none) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS` | Groups to list in Obot's group picker up front, one per line or comma-separated (none) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL` | Accept `email_verified: false` (`false`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD` | `S256` or `none` (`S256`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE` | Do not send or verify a nonce (`false`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_EXTRA_AUDIENCES` | Extra accepted `aud` values, comma separated |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_ISSUER_VERIFICATION` | Accept a discovery document whose issuer differs (`false`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_DISCOVERY` | Use the endpoints below instead of discovery (`false`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_AUTHORIZATION_URL` | Authorization endpoint (discovery skipped only) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_TOKEN_URL` | Token endpoint (discovery skipped only) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_JWKS_URL` | JWKS endpoint (discovery skipped only) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_URL` | Userinfo endpoint override |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL` | Profile cache lifetime (`5m`), `0` disables |
 | `OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION` | Refresh upstream tokens after this age (`1h`) |
 | `OBOT_AUTH_PROVIDER_ENABLE_LOGGING` | oauth2-proxy request and auth logging (`false`) |
