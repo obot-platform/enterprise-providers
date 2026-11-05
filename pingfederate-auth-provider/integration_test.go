@@ -83,7 +83,7 @@ var providerEnv = []string{
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_ID", "OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_SECRET",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_ISSUER_URL", "OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM", "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE",
-	"OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM", "OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_DISPLAY_DOMAIN",
+	"OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM", "OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS",
 	"OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL", "OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD",
@@ -413,9 +413,8 @@ func TestLoginDisplaySettingsPreserveRawIdentity(t *testing.T) {
 	user.Email = "ADA"
 	idp.SetUser(user)
 	p := mustStartProvider(t, idp.Issuer(), map[string]string{
-		"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM":          "uid",
-		"OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM":           "preferred_username",
-		"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_DISPLAY_DOMAIN": "@Example.COM",
+		"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM": "uid",
+		"OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM":  "preferred_username",
 	})
 	p.mustLogin(t)
 	ss := p.mustGetState(t)
@@ -423,7 +422,7 @@ func TestLoginDisplaySettingsPreserveRawIdentity(t *testing.T) {
 		t.Fatalf("display settings changed session identity: %+v", ss)
 	}
 	status, profile := p.userInfo(t, ss.AccessToken)
-	if status != http.StatusOK || profile["id"] != "sub-ada" || profile["email"] != "ADA" || profile["name"] != "ada" || profile["email_display_domain"] != "example.com" {
+	if status != http.StatusOK || profile["id"] != "sub-ada" || profile["email"] != "ADA" || profile["name"] != "ada" {
 		t.Fatalf("status = %d, profile = %v", status, profile)
 	}
 	for _, id := range []string{"sub-ada", "ADA"} {
@@ -594,13 +593,13 @@ func TestUnverifiedEmail(t *testing.T) {
 	user.EmailVerified = &unverified
 	idp.SetUser(user)
 
-	t.Run("allowed by default", func(t *testing.T) {
-		p := mustStartProvider(t, idp.Issuer(), nil)
+	t.Run("allowed when enabled", func(t *testing.T) {
+		p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL": "true"})
 		p.mustLogin(t)
 	})
 
-	t.Run("rejected when required", func(t *testing.T) {
-		p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL": "false"})
+	t.Run("rejected by default", func(t *testing.T) {
+		p := mustStartProvider(t, idp.Issuer(), nil)
 		resp := p.login(t)
 		if resp.StatusCode == http.StatusFound && resp.Header.Get("Location") == "/after-login" {
 			t.Fatal("login with an unverified email should have failed")

@@ -1,8 +1,7 @@
 # PingFederate auth provider
 
-An Obot authentication provider for Ping Identity PingFederate. It uses the
-standard OpenID Connect authorization code flow, so it also works with any
-other identity provider that publishes a discovery document.
+An Obot authentication provider for Ping Identity PingFederate, using the
+OpenID Connect authorization code flow.
 
 Like Obot's other auth providers it is a thin wrapper around
 [oauth2-proxy](https://github.com/obot-platform/oauth2-proxy), which owns the
@@ -44,18 +43,14 @@ profile, and list their groups.
   the email address changes. Obot stores it as the provider user ID.
 - The email address comes from the `email` claim (configurable). Logins are
   accepted when the ID token does not carry `email_verified`, which
-  PingFederate typically omits; an explicit `email_verified: false` is also
-  accepted unless **Allow Unverified Email** is turned off.
+  PingFederate typically omits. An explicit `email_verified: false` is
+  rejected unless **Allow Unverified Email** is turned on, because an
+  unverified address would otherwise satisfy the allowed email domains. The
+  check applies only when the email claim is `email`.
 - **Name Claim** chooses the claim shown in **Identity & Access → Users → Name**
   (default: `name`). If missing, the provider falls back to `name`, then
   `given_name` + `family_name`, then `preferred_username`, then the email.
   Release the name claim in userinfo or the ID token; userinfo takes precedence.
-- **Email Display Domain** appends a domain to the Email Claim in **Users** and
-  **My Account** when it contains only a username. For example, `JDOE` with
-  `company.com` displays as `jdoe@company.com`. A full email address keeps its
-  existing domain. This is UI formatting; the raw email claim, username,
-  subject, account matching, and group lookups keep their original values.
-  Leave the domain empty if no suffix is needed.
 - Groups are reported to Obot as `pingfederate/<group name>`, matching the
   `groupIDPrefix` in the manifest. Group names are taken from the groups claim
   verbatim; set **Groups Delimiter** when PingFederate sends them as one
@@ -79,6 +74,25 @@ three provider-specific endpoints over the loopback interface:
 | `GET /obot-list-auth-groups` | Backs the group picker in Obot's admin UI. PingFederate has no directory API, so the provider lists the groups declared in **Known Groups** plus every group seen in a token since it started. |
 | `GET /obot-get-auth-groups` | Resolves group IDs to names; a group's name is its ID without the `pingfederate/` prefix. |
 
+## Limitations
+
+PingFederate has no API for listing groups or a user's memberships, so the
+provider learns groups only from tokens and userinfo responses, and keeps them
+in memory:
+
+- After the provider restarts, it knows a user's groups again only once that
+  user's next request reaches it. Until then, Obot's background group
+  refresh for the user fails, and Obot keeps the memberships it already has;
+  it does not drop them.
+- With more than one Obot replica, each replica's provider knows only the
+  users who signed in through it.
+- The group picker lists **Known Groups** plus the groups seen since the
+  provider started. List every group you intend to map to a role under
+  **Known Groups**, so the picker offers it regardless of restarts.
+- Up to 10,000 users and 10,000 discovered groups are remembered; group
+  information for a user is forgotten after 24 hours without a request from
+  that user.
+
 ## Configuration
 
 All settings are environment variables; Obot passes the values entered in the
@@ -101,12 +115,11 @@ Optional (defaults in parentheses):
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES` | Scopes to request (`openid email profile`); `openid` is always added |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM` | Email claim (`email`) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM` | Name claim for the Users Name column (`name`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_DISPLAY_DOMAIN` | UI-only domain suffix, e.g. `company.com` or `@company.com` (empty by default) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM` | Groups claim (`groups`) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER` | Delimiter when groups arrive as one string (none) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS` | Groups to list in Obot's group picker up front, one per line or comma-separated (none) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL` | Accept `email_verified: false` (`true`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD` | `S256`, `plain` or `none` (`S256`) |
+| `OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL` | Accept `email_verified: false` (`false`) |
+| `OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD` | `S256` or `none` (`S256`) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE` | Do not send or verify a nonce (`false`) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_EXTRA_AUDIENCES` | Extra accepted `aud` values, comma separated |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_ISSUER_VERIFICATION` | Accept a discovery document whose issuer differs (`false`) |
@@ -126,12 +139,8 @@ Optional (defaults in parentheses):
 go test ./...                              # unit tests and an end-to-end login against a mock IdP
 PINGFEDERATE_TEST_LOGGING=1 go test ./...  # same, with oauth2-proxy's own logs
 go run ./hack/mockidp                      # a standalone mock IdP for trying the provider in Obot
-IMAGE=... ./hack/e2e-container.sh          # runs an Obot image against the mock IdP
 ```
 
 `internal/mockidp` is a small OpenID Connect provider used by the tests. It
 serves discovery, JWKS, the authorization code flow with PKCE, refresh tokens
 and userinfo, and signs in as a configurable user without a login page.
-
-`hack/e2e-container.sh` drives a real login through a running Obot container, so
-it needs `IMAGE` set to an Obot image that bundles this provider.

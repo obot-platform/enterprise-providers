@@ -262,8 +262,8 @@ func (s *server) recordSession(ss *state.SerializableState) {
 }
 
 // getUserInfo returns the user's profile for the access token in the
-// Authorization header. Obot reads "id" (the subject, used for group lookups),
-// and would read "name" and "picture" if it knew this provider by name.
+// Authorization header. Obot reads "id" (the subject, used for group lookups)
+// and "name" (the user's display name).
 func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 	token := bearerToken(r.Header.Get("Authorization"))
 	if token == "" {
@@ -345,9 +345,6 @@ func (s *server) profile(claims map[string]any) map[string]any {
 	if name := oidc.StringClaim(claims, s.cfg.NameClaim); strings.TrimSpace(name) != "" {
 		out["name"] = name
 	}
-	// This is presentation metadata. Never modify the email claim, subject,
-	// session email, or the identifiers used for group lookups.
-	out["email_display_domain"] = s.cfg.EmailDisplayDomain
 	if email := oidc.StringClaim(claims, s.cfg.EmailClaim); email != "" {
 		out["email"] = email
 	}

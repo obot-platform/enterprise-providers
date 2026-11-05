@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -24,12 +25,11 @@ type Options struct {
 
 	Scopes                 string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES" default:"openid email profile"`
 	NameClaim              string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM" default:"name"`
-	EmailDisplayDomain     string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_DISPLAY_DOMAIN" optional:"true"`
 	EmailClaim             string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM" default:"email"`
 	GroupsClaim            string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM" default:"groups"`
 	GroupsDelimiter        string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER" optional:"true"`
 	KnownGroups            string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS" optional:"true"`
-	AllowUnverifiedEmail   string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL" default:"true"`
+	AllowUnverifiedEmail   string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL" default:"false"`
 	CodeChallengeMethod    string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD" default:"S256"`
 	SkipNonce              string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE" default:"false"`
 	ExtraAudiences         string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_EXTRA_AUDIENCES" optional:"true"`
@@ -69,6 +69,7 @@ type settings struct {
 	extraAudiences         []string
 	knownGroups            []string
 	caFiles                []string
+	tempFiles              []string // files created by resolve, removed by cleanup
 	cookieSecret           string
 	emailDomains           []string
 	refreshDuration        time.Duration
@@ -92,22 +93,6 @@ func (o Options) resolve() (*settings, error) {
 	s.NameClaim = strings.TrimSpace(o.NameClaim)
 	if s.NameClaim == "" {
 		s.NameClaim = "name"
-	}
-	s.EmailDisplayDomain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(o.EmailDisplayDomain), "@"))
-	if s.EmailDisplayDomain != "" {
-		if len(s.EmailDisplayDomain) > 253 {
-			return nil, fmt.Errorf("email display domain is too long")
-		}
-		for _, label := range strings.Split(s.EmailDisplayDomain, ".") {
-			if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
-				return nil, fmt.Errorf("invalid email display domain")
-			}
-			for _, c := range label {
-				if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
-					return nil, fmt.Errorf("invalid email display domain")
-				}
-			}
-		}
 	}
 
 	s.issuerURL = strings.TrimSpace(o.IssuerURL)
@@ -176,23 +161,15 @@ func (o Options) resolve() (*settings, error) {
 		return nil, fmt.Errorf("allowed email domains must not be empty (use * to allow any domain)")
 	}
 
-	if s.caFiles, err = resolveCAFiles(o.CAFile, o.CACertificate); err != nil {
-		return nil, err
-	}
-
 	cookieSecret, err := base64.StdEncoding.DecodeString(o.AuthCookieSecret)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode cookie secret: %w", err)
 	}
-	// Obot generates secrets that survive trimming, and older installations
-	// stored them with a trailing newline, so whitespace is trimmed only when
-	// the raw value is not already a usable key.
-	s.cookieSecret = string(cookieSecret)
-	if !validCookieSecretLength(len(s.cookieSecret)) {
-		s.cookieSecret = strings.TrimSpace(s.cookieSecret)
-	}
-	if !validCookieSecretLength(len(s.cookieSecret)) {
-		return nil, fmt.Errorf("cookie secret must decode to 16, 24, or 32 bytes, got %d", len(s.cookieSecret))
+	// Trimmed like the other Obot auth providers, because older installations
+	// stored the secret with a trailing newline.
+	s.cookieSecret = strings.TrimSpace(string(cookieSecret))
+	if n := len(s.cookieSecret); n != 16 && n != 24 && n != 32 {
+		return nil, fmt.Errorf("cookie secret must decode to 16, 24, or 32 bytes, got %d", n)
 	}
 
 	if s.refreshDuration, err = time.ParseDuration(o.AuthTokenRefreshDuration); err != nil {
@@ -208,11 +185,20 @@ func (o Options) resolve() (*settings, error) {
 		return nil, fmt.Errorf("userinfo cache TTL must not be negative")
 	}
 
+	// Last, so that no earlier validation failure leaves a temporary file behind.
+	if s.caFiles, s.tempFiles, err = resolveCAFiles(o.CAFile, o.CACertificate); err != nil {
+		return nil, err
+	}
+
 	return s, nil
 }
 
-func validCookieSecretLength(n int) bool {
-	return n == 16 || n == 24 || n == 32
+// cleanup removes the temporary files resolve created.
+func (s *settings) cleanup() {
+	for _, f := range s.tempFiles {
+		_ = os.Remove(f)
+	}
+	s.tempFiles = nil
 }
 
 func validateHTTPURL(name, value string) error {
@@ -239,17 +225,17 @@ func parseBool(name, value string) (bool, error) {
 
 // normalizeCodeChallengeMethod maps the configured PKCE method to what
 // oauth2-proxy expects. "none" (or empty) turns PKCE off for an authorization
-// server that rejects unexpected code_challenge parameters.
+// server that rejects unexpected code_challenge parameters. The "plain" method
+// is not offered: it protects nothing that S256 does not, and PingFederate
+// supports S256.
 func normalizeCodeChallengeMethod(value string) (string, error) {
 	switch strings.ToUpper(strings.TrimSpace(value)) {
 	case "", "NONE", "OFF", "DISABLED":
 		return "", nil
 	case "S256":
 		return "S256", nil
-	case "PLAIN":
-		return "plain", nil
 	default:
-		return "", fmt.Errorf("code challenge method must be S256, plain, or none, got %q", value)
+		return "", fmt.Errorf("code challenge method must be S256 or none, got %q", value)
 	}
 }
 
@@ -292,36 +278,34 @@ func splitList(value string) []string {
 }
 
 // resolveCAFiles returns the PEM files that should be trusted in addition to
-// the system roots. A CA given as PEM text (the form that fits an admin UI
-// field) is written to a private temporary file, because oauth2-proxy only
-// accepts certificate authorities as file paths.
-func resolveCAFiles(caFile, caCertificate string) ([]string, error) {
-	var files []string
+// the system roots, and the temporary files among them. A CA given as PEM text
+// (the form that fits an admin UI field) is written to a private temporary
+// file, because oauth2-proxy only accepts certificate authorities as file
+// paths. The caller removes the temporary files with settings.cleanup.
+func resolveCAFiles(caFile, caCertificate string) (files, tempFiles []string, err error) {
 	if caFile = strings.TrimSpace(caFile); caFile != "" {
 		if _, err := os.Stat(caFile); err != nil {
-			return nil, fmt.Errorf("CA file is not readable: %w", err)
+			return nil, nil, fmt.Errorf("CA file is not readable: %w", err)
 		}
 		files = append(files, caFile)
 	}
 	if pem := strings.TrimSpace(caCertificate); pem != "" {
 		if !strings.Contains(pem, "-----BEGIN CERTIFICATE-----") {
-			return nil, fmt.Errorf("CA certificate must be one or more PEM-encoded certificates")
+			return nil, nil, fmt.Errorf("CA certificate must be one or more PEM-encoded certificates")
 		}
+		// CreateTemp opens the file with mode 0600.
 		f, err := os.CreateTemp("", "pingfederate-auth-provider-ca-*.pem")
 		if err != nil {
-			return nil, fmt.Errorf("failed to create temporary CA file: %w", err)
+			return nil, nil, fmt.Errorf("failed to create temporary CA file: %w", err)
 		}
-		if _, err := f.WriteString(pem + "\n"); err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("failed to write temporary CA file: %w", err)
-		}
-		if err := f.Close(); err != nil {
-			return nil, fmt.Errorf("failed to close temporary CA file: %w", err)
-		}
-		if err := os.Chmod(f.Name(), 0o600); err != nil {
-			return nil, fmt.Errorf("failed to protect temporary CA file: %w", err)
+		_, writeErr := f.WriteString(pem + "\n")
+		closeErr := f.Close()
+		if writeErr != nil || closeErr != nil {
+			_ = os.Remove(f.Name())
+			return nil, nil, fmt.Errorf("failed to write temporary CA file: %w", errors.Join(writeErr, closeErr))
 		}
 		files = append(files, f.Name())
+		tempFiles = append(tempFiles, f.Name())
 	}
-	return files, nil
+	return files, tempFiles, nil
 }

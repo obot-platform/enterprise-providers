@@ -9,7 +9,6 @@ import (
 func TestProfileDisplaySettingsPreserveIdentity(t *testing.T) {
 	o := validOptions()
 	o.NameClaim = "display_name"
-	o.EmailDisplayDomain = "@Example.COM"
 	cfg, err := o.resolve()
 	if err != nil {
 		t.Fatal(err)
@@ -20,36 +19,21 @@ func TestProfileDisplaySettingsPreserveIdentity(t *testing.T) {
 	if p["id"] != "stable-subject" || p["email"] != "JDOE" || claims["email"] != "JDOE" {
 		t.Fatalf("identity changed: %v", p)
 	}
-	if p["name"] != "Jane Doe" || p["email_display_domain"] != "example.com" {
+	if p["name"] != "Jane Doe" {
 		t.Fatalf("display mapping: %v", p)
 	}
 	delete(claims, "display_name")
 	if got := s.profile(claims)["name"]; got != "Fallback" {
 		t.Fatalf("fallback = %v", got)
 	}
-	o.EmailDisplayDomain = ""
-	cfg, err = o.resolve()
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.cfg = cfg
-	if got := s.profile(claims)["email_display_domain"]; got != "" {
-		t.Fatalf("domain did not clear: %v", got)
-	}
 }
 
-func TestDisplaySettingsValidation(t *testing.T) {
+func TestNameClaimDefault(t *testing.T) {
 	o := validOptions()
 	o.NameClaim = " "
 	cfg, err := o.resolve()
 	if err != nil || cfg.NameClaim != "name" {
 		t.Fatalf("default name: %v, %v", cfg, err)
-	}
-	for _, domain := range []string{"a@b.com", "https://example.com", "bad domain", ".example.com", "-bad.com"} {
-		o.EmailDisplayDomain = domain
-		if _, err := o.resolve(); err == nil {
-			t.Errorf("accepted domain %q", domain)
-		}
 	}
 }
 

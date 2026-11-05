@@ -15,7 +15,7 @@ func validOptions() Options {
 		Scopes:                   "openid email profile",
 		EmailClaim:               "email",
 		GroupsClaim:              "groups",
-		AllowUnverifiedEmail:     "true",
+		AllowUnverifiedEmail:     "false",
 		CodeChallengeMethod:      "S256",
 		SkipIssuerVerification:   "false",
 		SkipDiscovery:            "false",
@@ -32,7 +32,7 @@ func TestResolveDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if !s.allowUnverifiedEmail || s.skipIssuerVerification || s.skipDiscovery || s.skipNonce || s.loggingEnabled {
+	if s.allowUnverifiedEmail || s.skipIssuerVerification || s.skipDiscovery || s.skipNonce || s.loggingEnabled {
 		t.Errorf("unexpected booleans: %+v", s)
 	}
 	if s.codeChallengeMethod != "S256" {
@@ -76,7 +76,7 @@ func TestResolveNormalizesScopes(t *testing.T) {
 }
 
 func TestResolveCodeChallengeMethod(t *testing.T) {
-	cases := map[string]string{"S256": "S256", "s256": "S256", "plain": "plain", "none": "", "NONE": "", "disabled": ""}
+	cases := map[string]string{"S256": "S256", "s256": "S256", "none": "", "NONE": "", "disabled": ""}
 	for in, want := range cases {
 		o := validOptions()
 		o.CodeChallengeMethod = in
@@ -154,10 +154,10 @@ func TestResolveCACertificateWritesProtectedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(s.caFiles) != 1 {
-		t.Fatalf("caFiles = %v, want one temporary file", s.caFiles)
+	if len(s.caFiles) != 1 || len(s.tempFiles) != 1 || s.tempFiles[0] != s.caFiles[0] {
+		t.Fatalf("caFiles = %v, tempFiles = %v, want one temporary file", s.caFiles, s.tempFiles)
 	}
-	t.Cleanup(func() { _ = os.Remove(s.caFiles[0]) })
+	t.Cleanup(s.cleanup)
 
 	info, err := os.Stat(s.caFiles[0])
 	if err != nil {
@@ -172,6 +172,32 @@ func TestResolveCACertificateWritesProtectedFile(t *testing.T) {
 	}
 	if strings.TrimSpace(string(content)) != pemText {
 		t.Errorf("CA file content = %q", content)
+	}
+
+	path := s.caFiles[0]
+	s.cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("cleanup left %s behind: %v", path, err)
+	}
+}
+
+func TestResolvePlainPKCEIsRejected(t *testing.T) {
+	o := validOptions()
+	o.CodeChallengeMethod = "plain"
+	if _, err := o.resolve(); err == nil {
+		t.Error("plain PKCE should be rejected")
+	}
+}
+
+func TestResolveCookieSecretIsTrimmed(t *testing.T) {
+	o := validOptions()
+	o.AuthCookieSecret = base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32) + "\n"))
+	s, err := o.resolve()
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if s.cookieSecret != strings.Repeat("x", 32) {
+		t.Errorf("cookie secret = %q", s.cookieSecret)
 	}
 }
 
@@ -190,8 +216,12 @@ func TestResolveCAFileAndCertificateTogether(t *testing.T) {
 	if len(s.caFiles) != 2 || s.caFiles[0] != caFile {
 		t.Errorf("caFiles = %v", s.caFiles)
 	}
-	for _, f := range s.caFiles[1:] {
-		_ = os.Remove(f)
+	if len(s.tempFiles) != 1 || s.tempFiles[0] != s.caFiles[1] {
+		t.Errorf("tempFiles = %v, want only the written certificate", s.tempFiles)
+	}
+	s.cleanup()
+	if _, err := os.Stat(caFile); err != nil {
+		t.Errorf("cleanup removed the administrator's CA file: %v", err)
 	}
 }
 

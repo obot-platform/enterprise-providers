@@ -18,10 +18,18 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Printf("ERROR: %s: %v\n", providerName, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := loadOptions()
 	if err != nil {
-		fatalf("failed to load options: %v", err)
+		return fmt.Errorf("failed to load options: %w", err)
 	}
+	defer cfg.cleanup()
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -38,7 +46,7 @@ func main() {
 
 	srv, err := newServer(ctx, cfg, "http://"+addr)
 	if err != nil {
-		fatalf("%v", err)
+		return err
 	}
 
 	httpServer := &http.Server{
@@ -55,11 +63,7 @@ func main() {
 
 	fmt.Printf("listening on %s\n", addr)
 	if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-		fatalf("failed to listen and serve: %v", err)
+		return fmt.Errorf("failed to listen and serve: %w", err)
 	}
-}
-
-func fatalf(format string, args ...any) {
-	fmt.Printf("ERROR: %s: %s\n", providerName, fmt.Sprintf(format, args...))
-	os.Exit(1)
+	return nil
 }

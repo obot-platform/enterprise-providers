@@ -1,143 +1,137 @@
-name: "PingFederate"
+name: "${pingfederate_auth_provider_name}"
 command: "pingfederate-auth-provider/bin/obot-provider"
 icon: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b3282d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='11' width='18' height='11' rx='2'/><path d='M7 11V7a5 5 0 0 1 10 0v4'/></svg>"
 iconDark: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e8575c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='11' width='18' height='11' rx='2'/><path d='M7 11V7a5 5 0 0 1 10 0v4'/></svg>"
-description: "Auth provider for Ping Identity PingFederate, or any OpenID Connect provider with a discovery document"
+description: "${pingfederate_auth_provider_description}"
 link: "https://www.pingidentity.com/en/platform/capabilities/authentication-authority/pingfederate.html"
 requiredConfigurationParameters:
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_ID"
-    friendlyName: "Client ID"
-    description: "Client ID of the OAuth client created for Obot in PingFederate (Applications > OAuth > Clients)."
+    friendlyName: "${pingfederate_auth_provider_client_id_friendly_name}"
+    description: "${pingfederate_auth_provider_client_id_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_SECRET"
-    friendlyName: "Client Secret"
-    description: "Client secret of that OAuth client. The client must use client secret authentication at the token endpoint."
+    friendlyName: "${pingfederate_auth_provider_client_secret_friendly_name}"
+    description: "${pingfederate_auth_provider_client_secret_description}"
     sensitive: true
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_ISSUER_URL"
-    friendlyName: "Issuer URL"
-    description: "The OpenID Connect issuer, e.g. https://sso.example.com or https://sso.example.com:9031. Obot reads <issuer>/.well-known/openid-configuration, and the value must match the issuer in that document exactly."
+    friendlyName: "${pingfederate_auth_provider_issuer_url_friendly_name}"
+    description: "${pingfederate_auth_provider_issuer_url_description}"
     sensitive: false
   - name: "OBOT_AUTH_PROVIDER_COOKIE_SECRET"
-    friendlyName: "Cookie Secret"
-    description: "Secret used to encrypt cookies. Must be a random string of length 16, 24, or 32."
+    friendlyName: "${pingfederate_auth_provider_cookie_secret_friendly_name}"
+    description: "${pingfederate_auth_provider_cookie_secret_description}"
     sensitive: true
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_EMAIL_DOMAINS"
-    friendlyName: "Allowed E-Mail Domains"
-    description: "A list of email domains that are allowed to authenticate with this provider. * is a special value that allows all domains."
+    friendlyName: "${pingfederate_auth_provider_email_domains_friendly_name}"
+    description: "${pingfederate_auth_provider_email_domains_description}"
     sensitive: false
 optionalConfigurationParameters:
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_CERTIFICATE"
-    friendlyName: "CA Certificate (PEM)"
-    description: "PEM-encoded certificate(s) of the private CA that issued PingFederate's TLS certificate. Required when PingFederate is not signed by a public CA: the provider does not inherit the Obot server's trust store."
+    friendlyName: "${pingfederate_auth_provider_ca_certificate_friendly_name}"
+    description: "${pingfederate_auth_provider_ca_certificate_description}"
     sensitive: false
     multiline: true
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_FILE"
-    friendlyName: "CA Certificate File"
-    description: "Path, inside the Obot container, of a PEM CA bundle to trust in addition to the system roots. An alternative to pasting the certificate above."
+    friendlyName: "${pingfederate_auth_provider_ca_file_friendly_name}"
+    description: "${pingfederate_auth_provider_ca_file_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES"
-    friendlyName: "Scopes"
-    description: "OAuth scopes to request, separated by spaces. Default: openid email profile. Add the scope under which PingFederate releases group membership if it uses one. openid is always included."
+    friendlyName: "${pingfederate_auth_provider_scopes_friendly_name}"
+    description: "${pingfederate_auth_provider_scopes_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM"
-    friendlyName: "Name Claim"
-    description: "PingFederate claim to display in Users > Name, e.g. name or displayName. Release this claim in userinfo or the ID token; userinfo takes precedence. Default: name. If missing, falls back to the standard OIDC name fields, preferred_username, then the email claim."
+    friendlyName: "${pingfederate_auth_provider_name_claim_friendly_name}"
+    description: "${pingfederate_auth_provider_name_claim_description}"
     sensitive: false
-    hidden: false
-  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_DISPLAY_DOMAIN"
-    friendlyName: "Email Display Domain"
-    description: "Domain to append in Users and My Account when the Email Claim contains only a username, e.g. company.com displays JDOE as jdoe@company.com. Full email addresses keep their existing domain. UI display is lowercase. Does not change the email claim, username, sign-in, or group mapping. Leave empty to display the claim without a suffix."
-    sensitive: false
-    hidden: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM"
-    friendlyName: "Email Claim"
-    description: "Name of the claim that carries the user's email address. Default: email"
+    friendlyName: "${pingfederate_auth_provider_email_claim_friendly_name}"
+    description: "${pingfederate_auth_provider_email_claim_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM"
-    friendlyName: "Groups Claim"
-    description: "Name of the claim that carries the user's group memberships, in the ID token or the userinfo response. Default: groups"
+    friendlyName: "${pingfederate_auth_provider_groups_claim_friendly_name}"
+    description: "${pingfederate_auth_provider_groups_claim_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER"
-    friendlyName: "Groups Delimiter"
-    description: "Set when PingFederate sends group membership as one delimited string instead of a list, e.g. a comma. Leave empty when the claim is a list, or when group names may contain the delimiter."
+    friendlyName: "${pingfederate_auth_provider_groups_delimiter_friendly_name}"
+    description: "${pingfederate_auth_provider_groups_delimiter_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS"
-    friendlyName: "Known Groups"
-    description: "Group names (one per line, or comma-separated) exactly as PingFederate releases them, e.g. LDAP groups to map to Obot roles. They appear in Obot's group picker before any member has signed in; groups seen at sign-in are added automatically."
+    friendlyName: "${pingfederate_auth_provider_known_groups_friendly_name}"
+    description: "${pingfederate_auth_provider_known_groups_description}"
     sensitive: false
     multiline: true
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_ALLOW_UNVERIFIED_EMAIL"
-    friendlyName: "Allow Unverified Email"
-    description: "Accept logins whose ID token marks the email as unverified (email_verified: false). PingFederate usually does not emit email_verified at all, which is always accepted. Default: true"
+    friendlyName: "${pingfederate_auth_provider_allow_unverified_email_friendly_name}"
+    description: "${pingfederate_auth_provider_allow_unverified_email_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CODE_CHALLENGE_METHOD"
-    friendlyName: "PKCE Method"
-    description: "Proof Key for Code Exchange method: S256 (default, recommended), plain, or none to disable PKCE if the OAuth client rejects it."
+    friendlyName: "${pingfederate_auth_provider_code_challenge_method_friendly_name}"
+    description: "${pingfederate_auth_provider_code_challenge_method_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_NONCE"
-    friendlyName: "Skip Nonce Verification"
-    description: "Set to true only if PingFederate does not return the nonce in the ID token. Default: false (the nonce is sent and verified)"
+    friendlyName: "${pingfederate_auth_provider_skip_nonce_friendly_name}"
+    description: "${pingfederate_auth_provider_skip_nonce_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_EXTRA_AUDIENCES"
-    friendlyName: "Extra Audiences"
-    description: "Additional audience values accepted in the ID token besides the client ID, separated by commas."
+    friendlyName: "${pingfederate_auth_provider_extra_audiences_friendly_name}"
+    description: "${pingfederate_auth_provider_extra_audiences_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_ISSUER_VERIFICATION"
-    friendlyName: "Skip Issuer Verification"
-    description: "Set to true if the issuer in the discovery document differs from the Issuer URL (for example behind a proxy that rewrites hosts). Default: false"
+    friendlyName: "${pingfederate_auth_provider_skip_issuer_verification_friendly_name}"
+    description: "${pingfederate_auth_provider_skip_issuer_verification_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_SKIP_DISCOVERY"
-    friendlyName: "Skip Discovery"
-    description: "Set to true to configure the endpoints below by hand instead of reading the discovery document. Default: false"
+    friendlyName: "${pingfederate_auth_provider_skip_discovery_friendly_name}"
+    description: "${pingfederate_auth_provider_skip_discovery_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_AUTHORIZATION_URL"
-    friendlyName: "Authorization Endpoint"
-    description: "Used only when discovery is skipped, e.g. https://sso.example.com/as/authorization.oauth2"
+    friendlyName: "${pingfederate_auth_provider_authorization_url_friendly_name}"
+    description: "${pingfederate_auth_provider_authorization_url_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_TOKEN_URL"
-    friendlyName: "Token Endpoint"
-    description: "Used only when discovery is skipped, e.g. https://sso.example.com/as/token.oauth2"
+    friendlyName: "${pingfederate_auth_provider_token_url_friendly_name}"
+    description: "${pingfederate_auth_provider_token_url_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_JWKS_URL"
-    friendlyName: "JWKS Endpoint"
-    description: "Used only when discovery is skipped, e.g. https://sso.example.com/pf/JWKS"
+    friendlyName: "${pingfederate_auth_provider_jwks_url_friendly_name}"
+    description: "${pingfederate_auth_provider_jwks_url_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_URL"
-    friendlyName: "Userinfo Endpoint"
-    description: "Overrides the userinfo endpoint from the discovery document, e.g. https://sso.example.com/idp/userinfo.openid. Required for profiles and groups when discovery is skipped."
+    friendlyName: "${pingfederate_auth_provider_userinfo_url_friendly_name}"
+    description: "${pingfederate_auth_provider_userinfo_url_description}"
     sensitive: false
   - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL"
-    friendlyName: "Userinfo Cache Duration"
-    description: "How long a user's profile from the userinfo endpoint is reused before PingFederate is asked again, in a format like 5m or 1h. 0 disables the cache. Default: 5m"
+    friendlyName: "${pingfederate_auth_provider_userinfo_cache_ttl_friendly_name}"
+    description: "${pingfederate_auth_provider_userinfo_cache_ttl_description}"
     sensitive: false
   - name: "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN"
-    friendlyName: "PostgreSQL connection string (DSN)"
-    description: "The connection string for a PostgreSQL database to use for session storage. If unset, cookies will be used for session storage instead."
+    friendlyName: "${pingfederate_auth_provider_postgres_connection_dsn_friendly_name}"
+    description: "${pingfederate_auth_provider_postgres_connection_dsn_description}"
     sensitive: true
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_POSTGRES_MAX_CONNECTIONS"
-    friendlyName: "PostgreSQL max connections"
-    description: "The maximum number of open connections to the PostgreSQL database."
+    friendlyName: "${pingfederate_auth_provider_postgres_max_connections_friendly_name}"
+    description: "${pingfederate_auth_provider_postgres_max_connections_description}"
     sensitive: false
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_POSTGRES_MAX_IDLE_CONNECTIONS"
-    friendlyName: "PostgreSQL max idle connections"
-    description: "The maximum number of idle connections to the PostgreSQL database."
+    friendlyName: "${pingfederate_auth_provider_postgres_max_idle_connections_friendly_name}"
+    description: "${pingfederate_auth_provider_postgres_max_idle_connections_description}"
     sensitive: false
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_LIFETIME_SECONDS"
-    friendlyName: "PostgreSQL connection lifetime"
-    description: "The maximum lifetime of a connection to the PostgreSQL database."
+    friendlyName: "${pingfederate_auth_provider_postgres_connection_lifetime_seconds_friendly_name}"
+    description: "${pingfederate_auth_provider_postgres_connection_lifetime_seconds_description}"
     sensitive: false
     hidden: true
   - name: "OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"
-    friendlyName: "Token Refresh Duration"
-    description: "Time to wait before attempting to refresh auth tokens. Should be in a format like 1h1m1s. Default: 1h"
+    friendlyName: "${pingfederate_auth_provider_token_refresh_duration_friendly_name}"
+    description: "${pingfederate_auth_provider_token_refresh_duration_description}"
     sensitive: false
   - name: "OBOT_AUTH_PROVIDER_ENABLE_LOGGING"
-    friendlyName: "Enable Logging"
-    description: "Set to true to enable request, auth, and standard logging for the auth provider. Default: false"
+    friendlyName: "${pingfederate_auth_provider_enable_logging_friendly_name}"
+    description: "${pingfederate_auth_provider_enable_logging_description}"
     sensitive: false
 postgresTablePrefix: "pingfederate_"
 groupIDPrefix: "pingfederate/"
