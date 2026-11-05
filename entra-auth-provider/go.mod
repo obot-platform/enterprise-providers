@@ -15,7 +15,7 @@ require (
 	github.com/microsoftgraph/msgraph-sdk-go-core v1.3.2
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
 	github.com/obot-platform/enterprise-providers/authcommon v0.0.0
-	github.com/obot-platform/providers/auth-providers-common v0.0.0-20261009133010-06ec700f9187
+	github.com/obot-platform/providers/auth-providers-common v0.0.0-20261105175221-d62ef1d5bdc1
 )
 
 require (
