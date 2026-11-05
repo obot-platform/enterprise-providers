@@ -24,6 +24,10 @@ profile, and list their groups.
      and `family_name`), `preferred_username`, and, for group-based access
      control in Obot, a group membership attribute (`groups` by default).
      Groups can be released in the ID token, the userinfo response, or both.
+     PingFederate releases only the claims mapped to a scope the client
+     requests, so map the groups attribute to a scope (for example a
+     `groups` scope) and add that scope to **Scopes** in Obot. A user without
+     it signs in with no groups.
 2. In Obot, go to **Identity & Access > Auth Providers**, configure
    **PingFederate**, and enter the client ID, client secret, and issuer URL
    (`https://sso.example.com` or `https://sso.example.com:9031`). The issuer
@@ -136,6 +140,10 @@ go test ./...                              # unit tests and an end-to-end login 
 PINGFEDERATE_TEST_LOGGING=1 go test ./...  # same, with oauth2-proxy's own logs
 go run ./hack/mockidp                      # a standalone mock IdP for trying the provider in Obot
 ```
+
+[`hack/pingfederate`](hack/pingfederate/README.md) runs a real PingFederate,
+backed by PingDirectory, in Docker, with the OAuth client and OIDC policy
+Obot needs.
 
 `internal/mockidp` is a small OpenID Connect provider used by the tests. It
 serves discovery, JWKS, the authorization code flow with PKCE, refresh tokens

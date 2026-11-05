@@ -1,0 +1,59 @@
+# A local PingFederate, backed by PingDirectory, for trying the provider
+# against the real product. See README.md in this directory.
+#
+# The containers fetch a Ping Identity DevOps evaluation license at first
+# start, so PING_IDENTITY_DEVOPS_USER and PING_IDENTITY_DEVOPS_KEY must be set
+# in the environment of `docker compose up`. Only their names appear here:
+# never write the values into this file or an env file.
+name: obot-pingfederate
+
+x-ping: &ping
+  tmpfs: /run/secrets
+  environment: &ping-env
+    PING_IDENTITY_ACCEPT_EULA: "YES"
+    PING_IDENTITY_DEVOPS_USER:
+    PING_IDENTITY_DEVOPS_KEY:
+    PING_IDENTITY_DEVOPS_KEY_REDACT: "true"
+    SERVER_PROFILE_URL: https://github.com/pingidentity/pingidentity-server-profiles.git
+    PD_ENGINE_PRIVATE_HOSTNAME: pingdirectory
+    PF_ENGINE_PRIVATE_HOSTNAME: pingfederate
+    PF_ENGINE_PUBLIC_HOSTNAME: localhost
+    PF_ADMIN_PUBLIC_HOSTNAME: localhost
+
+services:
+  pingdirectory:
+    <<: *ping
+    image: pingidentity/pingdirectory:2610-11.1.0.2
+    environment:
+      <<: *ping-env
+      # Ping's baseline profile: users user.0 to user.N with mail, cn and
+      # password 2FederateM0re, and groups whose members have isMemberOf.
+      SERVER_PROFILE_PATH: baseline/pingdirectory
+      MAKELDIF_USERS: "10"
+    volumes:
+      - pingdirectory-out:/opt/out
+
+  pingfederate:
+    <<: *ping
+    image: pingidentity/pingfederate:2610-13.1.4
+    depends_on:
+      pingdirectory:
+        condition: service_healthy
+    environment:
+      <<: *ping-env
+      # Ping's baseline profile: an HTML login form that checks passwords
+      # against PingDirectory, and a JWT access token manager. configure.sh
+      # adds the OIDC policy and the OAuth client for Obot.
+      SERVER_PROFILE_PATH: baseline/pingfederate
+    ports:
+      # 9031: the runtime engine; the OIDC issuer is https://localhost:9031.
+      # 9999: the admin console (https://localhost:9999/pingfederate/app,
+      # administrator / 2FederateM0re) and the Admin API.
+      - "127.0.0.1:9031:9031"
+      - "127.0.0.1:9999:9999"
+    volumes:
+      - pingfederate-out:/opt/out
+
+volumes:
+  pingdirectory-out:
+  pingfederate-out:
