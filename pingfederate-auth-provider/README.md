@@ -84,23 +84,27 @@ PingFederate has no API for listing groups or a user's memberships, so the
 provider learns groups from tokens and userinfo responses, and records them
 for the lookups Obot makes without a token.
 
-**Keeping groups current.** A session's groups come from the ID token it was
-created with, and PingFederate does not issue a new ID token on refresh by
-default. So the provider asks userinfo for the user's groups once per access
-token, and each refresh brings a new token: a change to a user's groups in
-PingFederate reaches Obot within one **Token Refresh Duration**, without the
-user signing in again. Release the groups attribute in userinfo for this to
-work. When userinfo carries no groups claim (groups released only in the ID
-token), the ID token's groups are used, and they change only when PingFederate
-issues a new ID token: at sign-in, or on refresh if the OpenID Connect policy
-returns an ID token on the refresh grant.
+**Keeping groups current.** A session's ID token is the one it was created
+with, and PingFederate does not issue a new one on refresh by default. So
+groups come from userinfo, which evaluates the user's attributes when it is
+asked: the provider asks it once per access token, and each refresh brings a
+new token, so a change to a user's groups in PingFederate reaches Obot within
+one **Token Refresh Duration**, without the user signing in again. Release the
+groups attribute in userinfo. A userinfo answer without the groups claim means
+the user has no groups, since PingFederate omits an empty attribute; groups
+released only in the ID token are not read. (Only an identity provider without a
+userinfo endpoint has its groups read from the ID token, ordered by its `iat`.)
+
+A request that refreshes the session still carries the session from before the
+refresh. The provider loads the refreshed session from the cookies the refresh
+set, and records from that, so groups follow the refresh even for a client that
+never sends the new cookies back.
 
 Groups are recorded only from a successful userinfo answer for the session's
 subject. If userinfo fails, nothing is recorded, and the user's existing record
-stands: the session's own groups are from sign-in, and may include groups the
-user has since lost. A user's groups are recorded under their subject only, the
-identifier Obot looks them up by, never under an email address or another
-attribute a user might share or choose.
+stands. A user's groups are recorded under their subject only, the identifier
+Obot looks them up by, never under an email address or another attribute a
+user might share or choose.
 
 **Where groups are recorded.** Every Obot replica runs its own copy of the
 provider, so the records must be shared. When Obot uses PostgreSQL, which a
@@ -118,14 +122,17 @@ to it is discarded, and a provider
 still running on another replica must not bring them back. Expired rows are
 deleted hourly.
 
-Each record carries when its groups were observed: when userinfo answered, or
-when the ID token they came from was issued. A write is a single conditional
-upsert, and PostgreSQL applies it only if its observation is newer than the
-recorded one, so a replica holding an older answer cannot overwrite a newer one,
-whatever order the writes arrive in. A request that brings nothing newer, which
-is most requests, leaves the row untouched; the same observation renews a row at
-most hourly, to keep an active user's record from expiring. Whether to write is
-decided by the database, not by anything a replica remembers.
+Each record carries when its groups were observed: when userinfo answered.
+Recording first reads, without locking, the user's recorded observation and
+which of their groups were seen recently. Most requests repeat what is recorded,
+and stop there. Only a newer observation, or one due for its hourly renewal,
+goes on to a conditional upsert, which PostgreSQL applies only if the
+observation is still newer than the recorded one, so a replica holding an older
+answer cannot overwrite a newer one, whatever order the writes arrive in.
+Reading first matters: an upsert locks the row it conflicts with even when it
+changes nothing, and a group every user is in would have its row locked by
+every request. Whether to write is decided by the database, not by anything a
+replica remembers.
 
 Without PostgreSQL, a single-replica installation, the provider keeps the same
 records in memory. A restart forgets them until each user's next request, and

@@ -220,26 +220,44 @@ func migrateWithRetry(db *gorm.DB, table string, model any) error {
 	return fmt.Errorf("create table %s: %w", table, err)
 }
 
-// upsertUserGroups writes a user's groups if the observation is newer than the
-// recorded one, or if it is the same observation and the row is due for
-// renewal. The renewal keeps an active user's row from expiring when the
-// observation cannot get newer, as with groups released only in an ID token
-// PingFederate does not reissue on refresh. upsertSeenGroups, in the same
-// statement, records the groups for the group picker, renewing each at most
-// once per renewInterval. One statement is one round trip.
+// recordUserGroups reads before it writes. Most requests repeat what is
+// recorded, and a plain read takes no lock, while an INSERT ... ON CONFLICT
+// DO UPDATE locks the conflicting row even when its WHERE leaves the row
+// unchanged: a group every user is in would have its row locked by every
+// request. So one read decides whether anything is newer or due for renewal,
+// and only then do the conditional upserts run. They keep their conditions,
+// so that PostgreSQL still decides, atomically, between replicas writing at
+// the same time.
 const (
+	// readRecorded returns the user's recorded observation, if any, and
+	// which of their groups were seen recently enough to need no renewal.
+	readRecorded = `SELECT
+	(SELECT observed_at FROM ` + userGroupsTable + ` WHERE user_key = @key) AS observed_at,
+	(SELECT updated_at FROM ` + userGroupsTable + ` WHERE user_key = @key) AS updated_at,
+	CAST(COALESCE((SELECT json_agg(name) FROM ` + seenGroupsTable + `
+		WHERE name IN (SELECT jsonb_array_elements_text(CAST(@groups AS jsonb)))
+		AND last_seen_at > @renewBefore), '[]') AS text) AS fresh_groups`
+
+	// upsertUserGroups writes a user's groups if the observation is newer
+	// than the recorded one, or if it is the same observation and the row is
+	// due for renewal, which keeps an active user's row from expiring.
 	upsertUserGroups = `INSERT INTO ` + userGroupsTable + ` AS t (user_key, groups, observed_at, updated_at)
 	VALUES (@key, @groups, @observedAt, @now)
 	ON CONFLICT (user_key) DO UPDATE
 	SET groups = EXCLUDED.groups, observed_at = EXCLUDED.observed_at, updated_at = EXCLUDED.updated_at
-	WHERE EXCLUDED.observed_at > t.observed_at
+	WHERE EXCLUDED.observed_at > COALESCE(t.observed_at, '-infinity')
 	   OR (EXCLUDED.observed_at = t.observed_at AND t.updated_at <= @renewBefore)`
+
+	// upsertSeenGroups records groups for the group picker, renewing each at
+	// most once per renewInterval. Rows are written in name order, so that
+	// two statements locking overlapping groups lock them in the same order.
 	upsertSeenGroups = `INSERT INTO ` + seenGroupsTable + ` AS t (name, last_seen_at)
-	SELECT DISTINCT jsonb_array_elements_text(CAST(@groups AS jsonb)), CAST(@now AS timestamptz)
+	SELECT name, CAST(@now AS timestamptz)
+	FROM (SELECT DISTINCT jsonb_array_elements_text(CAST(@seen AS jsonb)) AS name) AS names
+	ORDER BY name
 	ON CONFLICT (name) DO UPDATE
 	SET last_seen_at = EXCLUDED.last_seen_at
 	WHERE t.last_seen_at <= @renewBefore`
-	recordUserAndSeenGroups = `WITH user_row AS (` + upsertUserGroups + `), seen AS (` + upsertSeenGroups + `) SELECT 1`
 )
 
 func (p *postgresGroupStore) recordUserGroups(ctx context.Context, key string, groups []string, observedAt time.Time) error {
@@ -251,19 +269,57 @@ func (p *postgresGroupStore) recordUserGroups(ctx context.Context, key string, g
 		return err
 	}
 	now := p.now()
+	observedAt = truncateToPostgres(observedAt)
 	args := map[string]any{
 		"key":         key,
 		"groups":      string(encoded),
-		"observedAt":  truncateToPostgres(observedAt),
+		"observedAt":  observedAt,
 		"now":         now,
 		"renewBefore": now.Add(-renewInterval),
 	}
-	statement := upsertUserGroups
-	if len(groups) > 0 {
-		statement = recordUserAndSeenGroups
+	db := p.db.WithContext(ctx)
+
+	var recorded struct {
+		ObservedAt  *time.Time
+		UpdatedAt   *time.Time
+		FreshGroups string // a JSON array of group names
 	}
-	if err := p.db.WithContext(ctx).Exec(statement, args).Error; err != nil {
-		return fmt.Errorf("record user groups: %w", err)
+	if err := db.Raw(readRecorded, args).Row().Scan(&recorded.ObservedAt, &recorded.UpdatedAt, &recorded.FreshGroups); err != nil {
+		return fmt.Errorf("read recorded groups: %w", err)
+	}
+
+	userDue := recorded.ObservedAt == nil || recorded.UpdatedAt == nil ||
+		observedAt.After(*recorded.ObservedAt) ||
+		(observedAt.Equal(*recorded.ObservedAt) && !recorded.UpdatedAt.After(now.Add(-renewInterval)))
+	if userDue {
+		if err := db.Exec(upsertUserGroups, args).Error; err != nil {
+			return fmt.Errorf("record user groups: %w", err)
+		}
+	}
+
+	var freshGroups []string
+	if err := json.Unmarshal([]byte(recorded.FreshGroups), &freshGroups); err != nil {
+		return fmt.Errorf("decode recorded groups: %w", err)
+	}
+	fresh := map[string]bool{}
+	for _, name := range freshGroups {
+		fresh[name] = true
+	}
+	var seenDue []string
+	for _, name := range groups {
+		if !fresh[name] {
+			seenDue = append(seenDue, name)
+		}
+	}
+	if len(seenDue) > 0 {
+		encodedSeen, err := json.Marshal(seenDue)
+		if err != nil {
+			return err
+		}
+		args["seen"] = string(encodedSeen)
+		if err := db.Exec(upsertSeenGroups, args).Error; err != nil {
+			return fmt.Errorf("record seen groups: %w", err)
+		}
 	}
 	return nil
 }

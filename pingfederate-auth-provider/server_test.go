@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -187,17 +188,17 @@ func TestGetUserInfoRequiresToken(t *testing.T) {
 	}
 }
 
-func TestGetUserInfoKeepsIDTokenGroupsWhenUserinfoHasNoGroupsClaim(t *testing.T) {
+func TestGetUserInfoWithoutGroupsClaimRecordsNoGroups(t *testing.T) {
 	var calls atomic.Int32
 	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com"})
 	s := newTestServer(t, upstream.URL, time.Minute)
-	s.rememberGroups(t.Context(), "sub-1", []string{"admins"}, time.Now())
+	s.rememberGroups(t.Context(), "sub-1", []string{"admins"}, time.Now().Add(-time.Hour))
 
 	if rec, _ := getUserInfo(t, s, "Bearer tok"); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if _, groups := listGroups(t, s, "sub-1"); len(groups) != 1 || groups[0].ID != "pingfederate/admins" {
-		t.Errorf("groups = %+v, want the ID token groups to survive", groups)
+	if rec, groups := listGroups(t, s, "sub-1"); rec.Code != http.StatusOK || len(groups) != 0 {
+		t.Errorf("groups = %d %+v, want none: userinfo omits an empty groups claim", rec.Code, groups)
 	}
 }
 
@@ -229,7 +230,7 @@ func TestListUserAuthGroups(t *testing.T) {
 func TestRecordSession(t *testing.T) {
 	// Without a userinfo endpoint, the ID token is the only source of groups.
 	s := newTestServer(t, "", time.Minute)
-	idToken := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"sub-9","email":"z@example.com","groups":["admins","devs"]}`)) + ".s"
+	idToken := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"sub-9","email":"z@example.com","iat":`+strconv.FormatInt(time.Now().Unix(), 10)+`,"groups":["admins","devs"]}`)) + ".s"
 
 	ss := state.SerializableState{AccessToken: "tok", IDToken: idToken, User: "sub-9", Email: "z@example.com"}
 	s.recordSession(t.Context(), &ss)
@@ -254,12 +255,13 @@ func TestRecordSession(t *testing.T) {
 		t.Errorf("GroupInfos = %q, want the ID token's", got)
 	}
 
-	// A session without an ID token falls back to the session's user, which
-	// oauth2-proxy sets to the subject, and records no groups.
+	// Without a userinfo endpoint, groups come from the ID token, observed
+	// when it was issued: a session without one says nothing current, and
+	// records nothing.
 	ss = state.SerializableState{AccessToken: "tok3", User: "u", Groups: []string{"g"}}
 	s.recordSession(t.Context(), &ss)
-	if rec, groups := listGroups(t, s, "u"); rec.Code != http.StatusOK || len(groups) != 0 {
-		t.Errorf("groups without ID token: status = %d, groups = %+v", rec.Code, groups)
+	if rec, _ := listGroups(t, s, "u"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("groups without ID token: status = %d, want nothing recorded", rec.Code)
 	}
 	if _, ok := s.idTokenClaims.Get("tok3"); ok {
 		t.Error("no claims should be cached without an ID token")

@@ -45,7 +45,10 @@ func defaultIDPConfig() mockidp.Config {
 		ClientSecret:    "obot-secret",
 		RequirePKCE:     true,
 		GroupsInIDToken: true,
-		EmailInIDToken:  true,
+		// The provider reads groups from userinfo, as PingFederate is set up
+		// to release them.
+		GroupsInUserinfo: true,
+		EmailInIDToken:   true,
 	}
 }
 

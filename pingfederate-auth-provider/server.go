@@ -56,10 +56,9 @@ type userinfoGroups struct {
 	observedAt time.Time
 	// subject is the subject userinfo answered for.
 	subject string
-	groups  []string
-	// present is whether userinfo carried the groups claim at all. When it
-	// does not, the groups come from the session.
-	present bool
+	// groups is the groups claim, empty when userinfo carries none:
+	// PingFederate omits an empty multi-valued attribute.
+	groups []string
 }
 
 // server wires oauth2-proxy (which owns the OAuth2/OIDC login flow and the
@@ -302,11 +301,55 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.recordSession(r.Context(), &ss)
+	if len(ss.SetCookies) > 0 {
+		// The state of a request that refreshed the session is the session
+		// from before the refresh. Load the refreshed one from the cookies the
+		// refresh set, and record from it, so that groups follow the refresh
+		// even if the client never sends those cookies back.
+		if refreshed, ok := s.refreshedState(req, ss.SetCookies); ok {
+			s.recordSession(r.Context(), &refreshed)
+			ss.GroupInfos = refreshed.GroupInfos
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(ss); err != nil {
 		http.Error(w, fmt.Sprintf("failed to encode state: %v", err), http.StatusInternalServerError)
 	}
+}
+
+// refreshedState loads the session a refresh just created, by replaying req
+// with the cookies the refresh set in place of the ones it carried.
+func (s *server) refreshedState(req *http.Request, setCookies []string) (state.SerializableState, bool) {
+	header := http.Header{}
+	for _, c := range setCookies {
+		header.Add("Set-Cookie", c)
+	}
+	refreshedCookies := (&http.Response{Header: header}).Cookies()
+	replaced := map[string]bool{}
+	for _, c := range refreshedCookies {
+		replaced[c.Name] = true
+	}
+
+	refreshedReq := req.Clone(req.Context())
+	refreshedReq.Header.Del("Cookie")
+	for _, c := range req.Cookies() {
+		if !replaced[c.Name] {
+			refreshedReq.AddCookie(c)
+		}
+	}
+	for _, c := range refreshedCookies {
+		if c.MaxAge >= 0 && c.Value != "" {
+			refreshedReq.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
+		}
+	}
+
+	refreshed, err := state.GetSerializableState(s.proxy, refreshedReq)
+	if err != nil || len(refreshed.SetCookies) > 0 {
+		slog.Warn("could not load the refreshed session to record the user's groups", "error", err)
+		return state.SerializableState{}, false
+	}
+	return refreshed, true
 }
 
 // recordSession fills in the group information for a session and records it
@@ -349,36 +392,31 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 	}
 }
 
-// sessionGroups returns the user's groups for a session, and whether they are
-// current enough to record for Obot's lookups.
+// sessionGroups returns the user's groups for a session, when they were
+// observed, and whether they are current enough to record for Obot's lookups.
 //
-// A session's ID token is the one it was created with, unless PingFederate
-// issued a new one on refresh, which by default it does not. So when a
-// userinfo endpoint exists, only its answer is recorded: userinfo evaluates the
-// user's attributes when it is asked. If userinfo fails, nothing is recorded,
-// because the ID token's groups may be ones the user has since lost, and the
-// record another request or replica wrote is likely fresher. Only when userinfo
-// carries no groups claim at all (groups released in the ID token alone) are
-// the ID token's groups recorded.
+// With a userinfo endpoint, which PingFederate always has, groups come from
+// userinfo alone: it evaluates the user's attributes when it is asked, while a
+// session's ID token is the one it was created with, which PingFederate does
+// not reissue on refresh by default. A userinfo answer without the groups
+// claim means the user has no groups, since PingFederate omits an empty
+// attribute. If userinfo fails, nothing is recorded, and the existing record
+// stands. Only without a userinfo endpoint are the ID token's groups used,
+// observed when it was issued.
 func (s *server) sessionGroups(ctx context.Context, token, subject string, idTokenClaims map[string]any) ([]string, time.Time, bool) {
 	tokenGroups := oidc.StringsClaim(idTokenClaims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
-	// The ID token's groups were observed when it was issued.
-	tokenIssued := oidc.TimeClaim(idTokenClaims, "iat")
 	if subject == "" {
-		return tokenGroups, tokenIssued, false
+		return tokenGroups, time.Time{}, false
 	}
 	if s.userinfoURL == "" {
-		return tokenGroups, tokenIssued, true
+		issued := oidc.TimeClaim(idTokenClaims, "iat")
+		return tokenGroups, issued, !issued.IsZero()
 	}
 	current, ok := s.currentGroups(ctx, token, subject)
-	switch {
-	case !ok:
-		return tokenGroups, tokenIssued, false
-	case current.present:
-		return current.groups, current.observedAt, true
-	default:
-		return tokenGroups, tokenIssued, true
+	if !ok {
+		return tokenGroups, time.Time{}, false
 	}
+	return current.groups, current.observedAt, true
 }
 
 // currentGroups returns what userinfo reports about the groups of the user
@@ -401,9 +439,10 @@ func (s *server) currentGroups(ctx context.Context, token, subject string) (user
 		s.tokenGroupsFailed.Add(token, struct{}{})
 		return userinfoGroups{}, false
 	}
-	result := userinfoGroups{subject: oidc.StringClaim(claims, "sub"), observedAt: answeredAt}
-	if _, result.present = claims[s.cfg.GroupsClaim]; result.present {
-		result.groups = oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
+	result := userinfoGroups{
+		subject:    oidc.StringClaim(claims, "sub"),
+		observedAt: answeredAt,
+		groups:     oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter),
 	}
 	s.tokenGroups.Add(token, result)
 	if result.subject != subject {
@@ -454,7 +493,8 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 	profile := s.profile(profileClaims)
 	// Record groups only from a live userinfo answer: the cached ID token
 	// claims are the session's, and may hold groups the user has since lost.
-	if _, ok := claims[s.cfg.GroupsClaim]; ok && fromUserinfo && subject != "" {
+	// An answer without the groups claim means the user has no groups.
+	if fromUserinfo && subject != "" {
 		if cached, known := s.idTokenClaims.Get(token); !known || oidc.StringClaim(cached, "sub") == subject {
 			groups := oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
 			s.rememberGroups(r.Context(), subject, groups, answeredAt)
@@ -555,6 +595,11 @@ func (s *server) listUserAuthGroups(w http.ResponseWriter, r *http.Request) {
 func (s *server) rememberGroups(ctx context.Context, subject string, groups []string, observedAt time.Time) {
 	if subject == "" {
 		return
+	}
+	// An observation from the future, such as an ID token from an identity
+	// provider whose clock runs fast, would outrank every later one.
+	if now := time.Now(); observedAt.After(now) {
+		observedAt = now
 	}
 	if err := s.store.recordUserGroups(ctx, subject, filterGroups(groups), observedAt); err != nil {
 		slog.Warn("failed to record the user's groups", "error", err)

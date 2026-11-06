@@ -9,6 +9,7 @@ replace (
 
 require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
 	github.com/obot-platform/enterprise-providers/authcommon v0.0.0
 	github.com/obot-platform/providers/auth-providers-common v0.0.0-20261105175221-d62ef1d5bdc1
@@ -40,7 +41,6 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.9.2 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect

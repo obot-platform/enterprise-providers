@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,7 +27,7 @@ func idTokenWithGroups(groups ...string) string {
 }
 
 func idTokenFor(subject string, groups ...string) string {
-	claims, _ := json.Marshal(map[string]any{"sub": subject, "email": "ada@example.com", "groups": groups})
+	claims, _ := json.Marshal(map[string]any{"sub": subject, "email": "ada@example.com", "groups": groups, "iat": time.Now().Unix()})
 	return "h." + base64.RawURLEncoding.EncodeToString(claims) + ".s"
 }
 
@@ -75,22 +77,24 @@ func TestRecordSessionTakesEmptyUserinfoGroups(t *testing.T) {
 	}
 }
 
-// When PingFederate releases groups only in the ID token, userinfo has no
-// groups claim, and the session's groups stand.
-func TestRecordSessionKeepsSessionGroupsWithoutUserinfoClaim(t *testing.T) {
+// PingFederate omits an empty multi-valued attribute, so a userinfo answer
+// without the groups claim means the user has no groups now, however many
+// their session's ID token lists.
+func TestUserinfoWithoutGroupsClaimMeansNoGroups(t *testing.T) {
 	var calls atomic.Int32
 	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com"})
 	s := newTestServer(t, upstream.URL, time.Minute)
+	s.rememberGroups(t.Context(), "sub-1", []string{"admins"}, time.Now().Add(-time.Hour))
 
 	for range 2 {
-		ss := state.SerializableState{AccessToken: "tok", IDToken: idTokenWithGroups("from-token"), Groups: []string{"from-token"}}
+		ss := state.SerializableState{AccessToken: "tok", IDToken: idTokenWithGroups("admins")}
 		s.recordSession(t.Context(), &ss)
 	}
-	if got := recordedGroups(t, s, "sub-1"); got != "pingfederate/from-token=from-token" {
-		t.Errorf("recorded groups = %q", got)
+	if got := recordedGroups(t, s, "sub-1"); got != "" {
+		t.Errorf("recorded groups = %q, want none", got)
 	}
 	if calls.Load() != 1 {
-		t.Errorf("userinfo calls = %d, want 1: the missing claim is remembered too", calls.Load())
+		t.Errorf("userinfo calls = %d, want 1 for one access token", calls.Load())
 	}
 }
 
@@ -607,8 +611,8 @@ func TestMemoryGroupStoreIgnoresOlderObservations(t *testing.T) {
 	}
 }
 
-// Repeating an observation leaves the row untouched: PostgreSQL makes no new
-// row version, so there is no write, WAL, or vacuum work per request.
+// Repeating an observation leaves the rows untouched: the read finds nothing
+// to write, so no write statement runs at all.
 func TestPostgresGroupStoreRepeatedObservationDoesNotWrite(t *testing.T) {
 	dsn := testPostgresDSN(t)
 	store := openTestPostgresStore(t, dsn)
@@ -635,5 +639,151 @@ func TestPostgresGroupStoreRepeatedObservationDoesNotWrite(t *testing.T) {
 	}
 	if got := rowVersion(seenGroupsTable, "name = ?", "devs"); got != seenVersion {
 		t.Errorf("seen group rewritten by a repeated observation: xmin %s -> %s", seenVersion, got)
+	}
+}
+
+// End to end, with PingFederate's defaults: removing a user from their last
+// group must reach Obot after the next refresh. PingFederate then omits the
+// groups claim from userinfo altogether.
+func TestRemovalFromAllGroupsFollowsRefresh(t *testing.T) {
+	cfg := defaultIDPConfig()
+	cfg.GroupsInIDToken = false
+	cfg.GroupsInUserinfo = true
+	cfg.OmitIDTokenOnRefresh = true
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+
+	p.mustLogin(t)
+	p.mustGetState(t)
+	if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || len(groups) != 2 {
+		t.Fatalf("groups after sign-in = %d %q", status, groupNames(groups))
+	}
+
+	user := adaUser
+	user.Groups = nil
+	idp.SetUser(user)
+	time.Sleep(2100 * time.Millisecond)
+
+	// The refreshing request records from the refreshed session itself, so
+	// the client does not even need to send the new cookies back.
+	ss := p.mustGetState(t)
+	if len(ss.SetCookies) == 0 {
+		t.Fatal("expected a refresh")
+	}
+	if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || len(groups) != 0 {
+		t.Errorf("groups after removal from all groups = %d %q, want none", status, groupNames(groups))
+	}
+}
+
+// A refreshing request reports the session from before the refresh. The
+// provider records from the refreshed session instead, so a client that keeps
+// replaying its old cookie cannot keep the groups it had.
+func TestRefreshingRequestRecordsFromRefreshedSession(t *testing.T) {
+	cfg := defaultIDPConfig()
+	cfg.OmitIDTokenOnRefresh = true
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+
+	p.mustLogin(t)
+	p.mustGetState(t)
+	user := adaUser
+	user.Groups = []string{"devs"}
+	idp.SetUser(user)
+	time.Sleep(2100 * time.Millisecond)
+
+	ss := p.mustGetState(t) // the refreshed cookies are deliberately not applied
+	if len(ss.SetCookies) == 0 {
+		t.Fatal("expected a refresh")
+	}
+	if got := groupNames(ss.GroupInfos); got != "pingfederate/devs=devs" {
+		t.Errorf("groups in the refreshing request's state = %q, want the refreshed session's", got)
+	}
+	if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || groupNames(groups) != "pingfederate/devs=devs" {
+		t.Errorf("recorded groups = %d %q, want the refreshed session's", status, groupNames(groups))
+	}
+}
+
+// Without a userinfo endpoint, groups come from the ID token, ordered by its
+// iat; a token without one cannot be ordered, and records nothing.
+func TestIDTokenWithoutIssuedAtRecordsNothing(t *testing.T) {
+	s := newTestServer(t, "", time.Minute)
+	claims, _ := json.Marshal(map[string]any{"sub": "sub-1", "groups": []string{"admins"}})
+	ss := state.SerializableState{AccessToken: "tok", IDToken: "h." + base64.RawURLEncoding.EncodeToString(claims) + ".s"}
+	s.recordSession(t.Context(), &ss)
+	if rec, _ := listGroups(t, s, "sub-1"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want nothing recorded", rec.Code)
+	}
+}
+
+// An observation from the future, such as from an identity provider whose
+// clock runs fast, is treated as current rather than outranking every later
+// observation.
+func TestFutureObservationIsCapped(t *testing.T) {
+	s := newTestServer(t, "", time.Minute)
+	s.rememberGroups(t.Context(), "sub-1", []string{"admins"}, time.Now().Add(24*time.Hour))
+	s.rememberGroups(t.Context(), "sub-1", []string{"devs"}, time.Now().Add(time.Millisecond))
+	if got := recordedGroups(t, s, "sub-1"); got != "pingfederate/devs=devs" {
+		t.Errorf("recorded groups = %q, want the later observation", got)
+	}
+}
+
+// A repeated observation must not lock the rows it would update: an INSERT
+// ... ON CONFLICT DO UPDATE locks the conflicting row even when its WHERE is
+// false, and a group every user is in would serialize every request. With the
+// rows locked by another transaction, the repeat must still complete.
+func TestPostgresRepeatedObservationTakesNoLocks(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	store := openTestPostgresStore(t, dsn)
+	ctx := t.Context()
+	observed := time.Now().Add(-time.Minute)
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"everyone"}, observed); err != nil {
+		t.Fatal(err)
+	}
+
+	locker := openTestPostgresStore(t, dsn)
+	tx := locker.db.Begin()
+	t.Cleanup(func() { tx.Rollback() })
+	for _, lock := range []string{
+		"SELECT 1 FROM " + userGroupsTable + " WHERE user_key = 'sub-1' FOR UPDATE",
+		"SELECT 1 FROM " + seenGroupsTable + " WHERE name = 'everyone' FOR UPDATE",
+	} {
+		if err := tx.Exec(lock).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	timeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := store.recordUserGroups(timeout, "sub-1", []string{"everyone"}, observed); err != nil {
+		t.Errorf("repeated observation blocked on locked rows: %v", err)
+	}
+}
+
+// Replicas writing overlapping groups at once, with every write due, must not
+// deadlock or fail.
+func TestPostgresConcurrentOverlappingWrites(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	stores := []*postgresGroupStore{openTestPostgresStore(t, dsn), openTestPostgresStore(t, dsn)}
+	ctx := t.Context()
+	groupSets := [][]string{{"a", "b", "c", "d"}, {"d", "c", "b", "a"}, {"b", "d"}, {"c", "a"}}
+	errs := make(chan error, 64)
+	var wg sync.WaitGroup
+	for i := range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			store := stores[i%len(stores)]
+			// Each write is a newer observation and every seen group is due,
+			// so every statement writes.
+			at := time.Now().Add(time.Duration(i) * time.Millisecond)
+			errs <- store.recordUserGroups(ctx, fmt.Sprintf("user-%d", i%8), groupSets[i%len(groupSets)], at)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent write: %v", err)
+		}
 	}
 }
