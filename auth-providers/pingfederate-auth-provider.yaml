@@ -1,0 +1,105 @@
+name: "${pingfederate_auth_provider_name}"
+command: "pingfederate-auth-provider/bin/obot-provider"
+icon: "/admin/assets/pingidentity_icon.png"
+iconDark: "/admin/assets/pingidentity_icon.png"
+description: "${pingfederate_auth_provider_description}"
+link: "https://www.pingidentity.com/en/platform/capabilities/authentication-authority/pingfederate.html"
+requiredEntitlements:
+  - "OBOT_ENTERPRISE_AUTH_PROVIDERS"
+requiredConfigurationParameters:
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_ID"
+    friendlyName: "${pingfederate_auth_provider_client_id_friendly_name}"
+    description: "${pingfederate_auth_provider_client_id_description}"
+    sensitive: false
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_SECRET"
+    friendlyName: "${pingfederate_auth_provider_client_secret_friendly_name}"
+    description: "${pingfederate_auth_provider_client_secret_description}"
+    sensitive: true
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_ISSUER_URL"
+    friendlyName: "${pingfederate_auth_provider_issuer_url_friendly_name}"
+    description: "${pingfederate_auth_provider_issuer_url_description}"
+    sensitive: false
+  - name: "OBOT_AUTH_PROVIDER_COOKIE_SECRET"
+    friendlyName: "${pingfederate_auth_provider_cookie_secret_friendly_name}"
+    description: "${pingfederate_auth_provider_cookie_secret_description}"
+    sensitive: true
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_EMAIL_DOMAINS"
+    friendlyName: "${pingfederate_auth_provider_email_domains_friendly_name}"
+    description: "${pingfederate_auth_provider_email_domains_description}"
+    sensitive: false
+optionalConfigurationParameters:
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_CERTIFICATE"
+    friendlyName: "${pingfederate_auth_provider_ca_certificate_friendly_name}"
+    description: "${pingfederate_auth_provider_ca_certificate_description}"
+    sensitive: false
+    multiline: true
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_FILE"
+    friendlyName: "${pingfederate_auth_provider_ca_file_friendly_name}"
+    description: "${pingfederate_auth_provider_ca_file_description}"
+    sensitive: false
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES"
+    friendlyName: "${pingfederate_auth_provider_scopes_friendly_name}"
+    description: "${pingfederate_auth_provider_scopes_description}"
+    sensitive: false
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM"
+    friendlyName: "${pingfederate_auth_provider_name_claim_friendly_name}"
+    description: "${pingfederate_auth_provider_name_claim_description}"
+    sensitive: false
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM"
+    friendlyName: "${pingfederate_auth_provider_email_claim_friendly_name}"
+    description: "${pingfederate_auth_provider_email_claim_description}"
+    sensitive: false
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM"
+    friendlyName: "${pingfederate_auth_provider_groups_claim_friendly_name}"
+    description: "${pingfederate_auth_provider_groups_claim_description}"
+    sensitive: false
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER"
+    friendlyName: "${pingfederate_auth_provider_groups_delimiter_friendly_name}"
+    description: "${pingfederate_auth_provider_groups_delimiter_description}"
+    sensitive: false
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS"
+    friendlyName: "${pingfederate_auth_provider_known_groups_friendly_name}"
+    description: "${pingfederate_auth_provider_known_groups_description}"
+    sensitive: false
+    multiline: true
+  - name: "OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL"
+    friendlyName: "${pingfederate_auth_provider_userinfo_cache_ttl_friendly_name}"
+    description: "${pingfederate_auth_provider_userinfo_cache_ttl_description}"
+    sensitive: false
+  - name: "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_DSN"
+    friendlyName: "${pingfederate_auth_provider_postgres_connection_dsn_friendly_name}"
+    description: "${pingfederate_auth_provider_postgres_connection_dsn_description}"
+    sensitive: true
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_POSTGRES_MAX_CONNECTIONS"
+    friendlyName: "${pingfederate_auth_provider_postgres_max_connections_friendly_name}"
+    description: "${pingfederate_auth_provider_postgres_max_connections_description}"
+    sensitive: false
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_POSTGRES_MAX_IDLE_CONNECTIONS"
+    friendlyName: "${pingfederate_auth_provider_postgres_max_idle_connections_friendly_name}"
+    description: "${pingfederate_auth_provider_postgres_max_idle_connections_description}"
+    sensitive: false
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_POSTGRES_CONNECTION_LIFETIME_SECONDS"
+    friendlyName: "${pingfederate_auth_provider_postgres_connection_lifetime_seconds_friendly_name}"
+    description: "${pingfederate_auth_provider_postgres_connection_lifetime_seconds_description}"
+    sensitive: false
+    hidden: true
+  - name: "OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION"
+    friendlyName: "${pingfederate_auth_provider_token_refresh_duration_friendly_name}"
+    description: "${pingfederate_auth_provider_token_refresh_duration_description}"
+    sensitive: false
+  - name: "OBOT_AUTH_PROVIDER_ENABLE_LOGGING"
+    friendlyName: "${pingfederate_auth_provider_enable_logging_friendly_name}"
+    description: "${pingfederate_auth_provider_enable_logging_description}"
+    sensitive: false
+postgresTablePrefix: "pingfederate_"
+# Tables the provider creates besides its session tables, named after the
+# prefix. Obot drops them, with the session tables, when the provider is
+# deconfigured.
+postgresTables:
+  - "user_groups"
+  - "seen_groups"
+groupIDPrefix: "pingfederate/"
