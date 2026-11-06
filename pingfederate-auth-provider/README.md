@@ -135,8 +135,8 @@ standard OpenID Connect checks and none of them can be turned off: it reads
 the discovery document, requires its `issuer` to match the configured issuer
 URL, sends and verifies a nonce, uses `S256` PKCE, accepts ID tokens only for
 the client ID, and rejects an explicit `email_verified: false`. The issuer and
-every endpoint in the discovery document must use HTTPS, except on a loopback
-host.
+the authorization, token, JWKS, and userinfo endpoints in the discovery
+document must use HTTPS, except on a loopback host.
 
 ## Configuration
 

@@ -42,6 +42,16 @@ const (
 	tokenGroupsRetry = time.Minute
 )
 
+// tokenGroupsTTL is how long userinfo's answer for an access token is reused:
+// until the session is due for a refresh, which brings a new token, so that an
+// answer is never reused much past the point it would have been asked again.
+func tokenGroupsTTL(cfg *settings) time.Duration {
+	if cfg.refreshDuration > 0 && cfg.refreshDuration < cacheTTL {
+		return cfg.refreshDuration
+	}
+	return cacheTTL
+}
+
 // userinfoGroups is what userinfo reported about an access token's groups.
 type userinfoGroups struct {
 	// subject is the subject userinfo answered for.
@@ -119,7 +129,7 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 		slog.Warn("the discovery document has no userinfo endpoint; user profiles will be read from ID token claims only")
 	}
 
-	proxy, err := newOAuthProxy(cfg)
+	proxy, err := newOAuthProxyWithRetry(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +153,7 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 		userinfoURL:       userinfoURL,
 		listenURL:         listenURL,
 		store:             store,
-		tokenGroups:       expirable.NewLRU[string, userinfoGroups](cacheSize, nil, cacheTTL),
+		tokenGroups:       expirable.NewLRU[string, userinfoGroups](cacheSize, nil, tokenGroupsTTL(cfg)),
 		tokenGroupsFailed: expirable.NewLRU[string, struct{}](cacheSize, nil, tokenGroupsRetry),
 		idTokenClaims:     expirable.NewLRU[string, map[string]any](cacheSize, nil, cacheTTL),
 		directory:         newGroupDirectory(cfg.knownGroups, store),
@@ -152,6 +162,21 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 		s.userinfo = expirable.NewLRU[string, map[string]any](cacheSize, nil, cfg.userinfoCacheTTL)
 	}
 	return s, nil
+}
+
+// newOAuthProxyWithRetry creates the oauth2-proxy, retrying a failure when
+// sessions are kept in PostgreSQL: oauth2-proxy creates its session tables
+// when it starts, and every replica starts the provider at once when it is
+// first configured, so creating the same tables at the same moment can fail on
+// all but one of them.
+func newOAuthProxyWithRetry(cfg *settings) (*oauth2proxy.OAuthProxy, error) {
+	proxy, err := newOAuthProxy(cfg)
+	for attempt := 1; err != nil && cfg.PostgresConnectionDSN != "" && attempt < 3; attempt++ {
+		slog.Warn("failed to start oauth2-proxy; retrying", "attempt", attempt, "error", err)
+		time.Sleep(time.Duration(attempt) * time.Second)
+		proxy, err = newOAuthProxy(cfg)
+	}
+	return proxy, err
 }
 
 // newOAuthProxy configures oauth2-proxy's generic OpenID Connect provider for
@@ -288,12 +313,14 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 // under the user's subject, the identifier Obot looks a user's groups up by.
 func (s *server) recordSession(ctx context.Context, ss *state.SerializableState) {
 	claims := map[string]any{}
+	claimsReadable := true
 	if ss.IDToken != "" {
 		// oauth2-proxy verified this token when it created or refreshed the
 		// session, so reading its claims without re-verifying is safe.
 		parsed, err := oidc.UnverifiedClaims(ss.IDToken)
 		if err != nil {
 			slog.Warn("could not read ID token claims", "error", err)
+			claimsReadable = false
 		} else {
 			claims = parsed
 		}
@@ -306,6 +333,14 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 
 	groups, record := s.sessionGroups(ctx, ss.AccessToken, subject, claims)
 	ss.GroupInfos = groupInfos(groups)
+	// The state of a request that refreshed the session is the session from
+	// before the refresh, with its old access token; the refreshed one comes
+	// back in cookies, and the next request records from it. Likewise a
+	// session whose access token has expired, and one whose ID token cannot
+	// be read, say nothing current about the user's groups.
+	if len(ss.SetCookies) > 0 || (ss.ExpiresOn != nil && ss.ExpiresOn.Before(time.Now())) || !claimsReadable {
+		record = false
+	}
 	if record {
 		s.rememberGroups(ctx, ss.AccessToken, subject, groups)
 	}

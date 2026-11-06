@@ -265,11 +265,12 @@ func TestRecordSession(t *testing.T) {
 		t.Error("no claims should be cached without an ID token")
 	}
 
-	// A garbage ID token is tolerated.
+	// A garbage ID token is tolerated, and records nothing: an empty list
+	// would make Obot drop the user's memberships.
 	ss = state.SerializableState{AccessToken: "tok4", IDToken: "garbage", User: "v"}
 	s.recordSession(t.Context(), &ss)
-	if rec, groups := listGroups(t, s, "v"); rec.Code != http.StatusOK || len(groups) != 0 {
-		t.Errorf("garbage token: status = %d, groups = %+v", rec.Code, groups)
+	if rec, _ := listGroups(t, s, "v"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("garbage token: status = %d, want nothing recorded", rec.Code)
 	}
 
 	// Nothing identifies the user: nothing is recorded.

@@ -533,3 +533,44 @@ func TestPostgresGroupStoreConcurrentStart(t *testing.T) {
 		}
 	}
 }
+
+// A request that refreshed the session reports the session from before the
+// refresh, and an expired session's token says nothing current: neither is
+// recorded. Otherwise replaying an old session cookie could keep re-recording
+// groups the user has lost.
+func TestRefreshingOrExpiredSessionRecordsNothing(t *testing.T) {
+	var calls atomic.Int32
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "groups": []any{"admins"}})
+	s := newTestServer(t, upstream.URL, time.Minute)
+
+	ss := state.SerializableState{AccessToken: "tok", IDToken: idTokenWithGroups("admins"), SetCookies: []string{"obot_access_token=refreshed"}}
+	s.recordSession(t.Context(), &ss)
+	if rec, _ := listGroups(t, s, "sub-1"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("refreshing request: status = %d, want nothing recorded", rec.Code)
+	}
+
+	expired := time.Now().Add(-time.Minute)
+	ss = state.SerializableState{AccessToken: "tok", IDToken: idTokenWithGroups("admins"), ExpiresOn: &expired}
+	s.recordSession(t.Context(), &ss)
+	if rec, _ := listGroups(t, s, "sub-1"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("expired session: status = %d, want nothing recorded", rec.Code)
+	}
+
+	current := time.Now().Add(time.Hour)
+	ss = state.SerializableState{AccessToken: "tok", IDToken: idTokenWithGroups("admins"), ExpiresOn: &current}
+	s.recordSession(t.Context(), &ss)
+	if got := recordedGroups(t, s, "sub-1"); got != "pingfederate/admins=admins" {
+		t.Errorf("current session: recorded groups = %q", got)
+	}
+}
+
+func TestTokenGroupsTTL(t *testing.T) {
+	cfg := &settings{refreshDuration: 5 * time.Minute}
+	if got := tokenGroupsTTL(cfg); got != 5*time.Minute {
+		t.Errorf("ttl = %v, want the refresh duration", got)
+	}
+	cfg.refreshDuration = 0
+	if got := tokenGroupsTTL(cfg); got != cacheTTL {
+		t.Errorf("ttl = %v, want %v without a refresh duration", got, cacheTTL)
+	}
+}
