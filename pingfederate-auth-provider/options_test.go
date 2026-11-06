@@ -221,7 +221,7 @@ func TestResolveUnescapesMultilineFields(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			o := validOptions()
 			o.CACertificate = encode(pemText)
-			o.KnownGroups = encode("admins\nengineering, sales")
+			o.KnownGroups = encode("admins\ncn=engineering,ou=groups")
 			s, err := o.resolve()
 			if err != nil {
 				t.Fatalf("resolve: %v", err)
@@ -235,7 +235,7 @@ func TestResolveUnescapesMultilineFields(t *testing.T) {
 			if got := strings.TrimSpace(string(content)); got != pemText {
 				t.Errorf("CA file content = %q, want %q", got, pemText)
 			}
-			if got := strings.Join(s.knownGroups, "|"); got != "admins|engineering|sales" {
+			if got := strings.Join(s.knownGroups, "|"); got != "admins|cn=engineering,ou=groups" {
 				t.Errorf("knownGroups = %q", got)
 			}
 		})

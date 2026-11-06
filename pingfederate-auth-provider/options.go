@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -80,7 +81,7 @@ func (o Options) resolve() (*settings, error) {
 	}
 
 	s.issuerURL = strings.TrimSpace(o.IssuerURL)
-	if err := validateHTTPURL("issuer URL", s.issuerURL); err != nil {
+	if err := ValidateEndpointURL("issuer URL", s.issuerURL); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(o.ClientID) == "" {
@@ -145,15 +146,31 @@ func (s *settings) cleanup() {
 	s.tempFiles = nil
 }
 
-func validateHTTPURL(name, value string) error {
+// ValidateEndpointURL checks a URL the provider sends credentials or tokens to:
+// the issuer, and the endpoints its discovery document names. It must be an
+// absolute HTTPS URL, or HTTP on a loopback host, without credentials. Over
+// plain HTTP anyone on the network path could read the client secret and
+// tokens, or substitute discovery and signing keys and forge ID tokens.
+func ValidateEndpointURL(name, value string) error {
 	u, err := url.Parse(value)
 	if err != nil {
 		return fmt.Errorf("%s %q is not a valid URL: %w", name, value, err)
 	}
-	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return fmt.Errorf("%s %q must be an absolute http(s) URL", name, value)
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {
+		return fmt.Errorf("%s %q must be an absolute HTTPS URL without credentials", name, value)
+	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("%s %q must use HTTPS, except on a loopback host", name, value)
 	}
 	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func parseBool(name, value string) (bool, error) {
@@ -188,12 +205,12 @@ func unescapeMultiline(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, `\r\n`, "\n"), `\n`, "\n")
 }
 
-// splitLines accepts one entry per line or comma-separated entries, so a
-// list pasted into a multi-line form field and a one-line value both work.
+// splitLines accepts one entry per line. It does not split on commas, which
+// group names such as LDAP DNs contain.
 func splitLines(value string) []string {
 	var out []string
 	seen := map[string]bool{}
-	for _, item := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' }) {
+	for _, item := range strings.FieldsFunc(value, func(r rune) bool { return r == '\n' || r == '\r' }) {
 		if item = strings.TrimSpace(item); item != "" && !seen[item] {
 			seen[item] = true
 			out = append(out, item)

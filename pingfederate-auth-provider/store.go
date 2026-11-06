@@ -70,15 +70,16 @@ type groupStore interface {
 type memoryGroupStore struct {
 	users *expirable.LRU[string, []string]
 
-	mu    sync.Mutex
-	seen  map[string]struct{}
-	order []string // oldest first, so the oldest is dropped when full
+	mu   sync.Mutex
+	seen map[string]time.Time // group name -> when it was last seen
+	now  func() time.Time
 }
 
 func newMemoryGroupStore() *memoryGroupStore {
 	return &memoryGroupStore{
 		users: expirable.NewLRU[string, []string](cacheSize, nil, userGroupsTTL),
-		seen:  map[string]struct{}{},
+		seen:  map[string]time.Time{},
+		now:   time.Now,
 	}
 }
 
@@ -97,16 +98,21 @@ func (m *memoryGroupStore) userGroups(_ context.Context, key string) ([]string, 
 func (m *memoryGroupStore) addSeenGroups(_ context.Context, groups []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := m.now()
 	for _, name := range groups {
-		if _, ok := m.seen[name]; ok {
-			continue
+		m.seen[name] = now
+	}
+	// When full, drop the groups seen least recently, as the PostgreSQL store
+	// lists only the most recently seen.
+	for len(m.seen) > maxSeenGroups {
+		var oldest string
+		var oldestAt time.Time
+		for name, at := range m.seen {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = name, at
+			}
 		}
-		m.seen[name] = struct{}{}
-		m.order = append(m.order, name)
-		for len(m.order) > maxSeenGroups {
-			delete(m.seen, m.order[0])
-			m.order = m.order[1:]
-		}
+		delete(m.seen, oldest)
 	}
 	return nil
 }
@@ -114,10 +120,21 @@ func (m *memoryGroupStore) addSeenGroups(_ context.Context, groups []string) err
 func (m *memoryGroupStore) seenGroups(context.Context) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	names := make([]string, len(m.order))
-	for i, name := range m.order {
-		names[len(m.order)-1-i] = name
+	cutoff := m.now().Add(-seenGroupsTTL)
+	names := make([]string, 0, len(m.seen))
+	for name, at := range m.seen {
+		if at.After(cutoff) {
+			names = append(names, name)
+		} else {
+			delete(m.seen, name)
+		}
 	}
+	sort.Slice(names, func(i, j int) bool {
+		if a, b := m.seen[names[i]], m.seen[names[j]]; !a.Equal(b) {
+			return a.After(b)
+		}
+		return names[i] < names[j]
+	})
 	return names, nil
 }
 
@@ -170,17 +187,34 @@ func openPostgresGroupStore(cfg *settings) (*postgresGroupStore, error) {
 	if cfg.PostgresConnectionLifetimeSeconds > 0 {
 		sqlDB.SetConnMaxLifetime(time.Duration(cfg.PostgresConnectionLifetimeSeconds) * time.Second)
 	}
-	if err := db.Table(userGroupsTable).AutoMigrate(&userGroupsRow{}); err != nil {
-		return nil, fmt.Errorf("create table %s: %w", userGroupsTable, err)
+	if err := migrateWithRetry(db, userGroupsTable, &userGroupsRow{}); err != nil {
+		return nil, err
 	}
-	if err := db.Table(seenGroupsTable).AutoMigrate(&seenGroupRow{}); err != nil {
-		return nil, fmt.Errorf("create table %s: %w", seenGroupsTable, err)
+	if err := migrateWithRetry(db, seenGroupsTable, &seenGroupRow{}); err != nil {
+		return nil, err
 	}
 	return &postgresGroupStore{
 		db:      db,
 		written: expirable.NewLRU[string, writtenRecord](cacheSize, nil, rewriteInterval),
 		now:     time.Now,
 	}, nil
+}
+
+// migrateWithRetry creates or updates a table. Every replica starts the
+// provider when it is first configured, and creating the same table at the
+// same moment can fail on all but one of them, so a failure is retried after
+// the winner has had time to finish.
+func migrateWithRetry(db *gorm.DB, table string, model any) error {
+	var err error
+	for attempt := range 3 {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		if err = db.Table(table).AutoMigrate(model); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("create table %s: %w", table, err)
 }
 
 // due reports whether value must be written for key: it is new, or it was

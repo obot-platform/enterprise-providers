@@ -57,7 +57,7 @@ func TestStringsClaim(t *testing.T) {
 		want      []string
 	}{
 		{"json array", []any{"admins", " devs ", "", 7}, "", []string{"admins", "devs"}},
-		{"json array with delimiter", []any{"admins,devs", "ops"}, ",", []string{"admins", "devs", "ops"}},
+		{"json array elements are not split", []any{"cn=admins,ou=groups", "ops"}, ",", []string{"cn=admins,ou=groups", "ops"}},
 		{"string slice", []string{"x", " "}, "", []string{"x"}},
 		{"comma separated", "admins, devs ,ops,", ",", []string{"admins", "devs", "ops"}},
 		{"comma kept without delimiter", "admins,devs", "", []string{"admins,devs"}},

@@ -388,11 +388,11 @@ func TestLoginFlowEndToEnd(t *testing.T) {
 		t.Errorf("second user info call was not served from cache (status %d, calls %d)", status, idp.Counts().Userinfo)
 	}
 
-	for _, id := range []string{"sub-ada", "ada@example.com"} {
-		status, groups := p.groups(t, id)
-		if status != http.StatusOK || groupNames(groups) != "pingfederate/admins=admins,pingfederate/devs=devs" {
-			t.Errorf("groups(%s) = %d %q", id, status, groupNames(groups))
-		}
+	if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || groupNames(groups) != "pingfederate/admins=admins,pingfederate/devs=devs" {
+		t.Errorf("groups(sub-ada) = %d %q", status, groupNames(groups))
+	}
+	if status, _ := p.groups(t, "ada@example.com"); status != http.StatusInternalServerError {
+		t.Errorf("groups by email = %d, want 500: groups are recorded under the subject only", status)
 	}
 	if status, _ := p.groups(t, "someone-else"); status != http.StatusInternalServerError {
 		t.Errorf("groups for unknown user: status = %d, want 500", status)
@@ -423,11 +423,8 @@ func TestLoginDisplaySettingsPreserveRawIdentity(t *testing.T) {
 	if status != http.StatusOK || profile["id"] != "sub-ada" || profile["email"] != "ADA" || profile["name"] != "ada" {
 		t.Fatalf("status = %d, profile = %v", status, profile)
 	}
-	for _, id := range []string{"sub-ada", "ADA"} {
-		status, groups := p.groups(t, id)
-		if status != http.StatusOK || groupNames(groups) != "pingfederate/admins=admins,pingfederate/devs=devs" {
-			t.Errorf("groups(%s) = %d %q", id, status, groupNames(groups))
-		}
+	if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || groupNames(groups) != "pingfederate/admins=admins,pingfederate/devs=devs" {
+		t.Errorf("groups(sub-ada) = %d %q", status, groupNames(groups))
 	}
 }
 
@@ -634,8 +631,8 @@ func TestCustomScopesAndClaims(t *testing.T) {
 	if status, profile := p.userInfo(t, ss.AccessToken); status != http.StatusOK || profile["email"] != "ada@example.com" || profile["id"] != "sub-ada" {
 		t.Errorf("user info = %d %v", status, profile)
 	}
-	if status, groups := p.groups(t, "ada@example.com"); status != http.StatusOK || len(groups) != 2 {
-		t.Errorf("groups by email = %d %q", status, groupNames(groups))
+	if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || len(groups) != 2 {
+		t.Errorf("groups = %d %q", status, groupNames(groups))
 	}
 }
 

@@ -19,6 +19,10 @@ import (
 	"time"
 )
 
+// maxResponseBytes bounds what is read from a discovery document or a userinfo
+// response, which are far smaller in practice.
+const maxResponseBytes = 1 << 20
+
 // Discovery is the subset of the OpenID Provider Metadata document we use.
 type Discovery struct {
 	Issuer                string `json:"issuer"`
@@ -81,7 +85,7 @@ func Discover(ctx context.Context, client *http.Client, issuer string) (*Discove
 		return nil, fmt.Errorf("fetch %s: unexpected status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var d Discovery
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&d); err != nil {
 		return nil, fmt.Errorf("decode discovery document: %w", err)
 	}
 	return &d, nil
@@ -116,7 +120,7 @@ func Userinfo(ctx context.Context, client *http.Client, userinfoURL, authorizati
 		return nil, fmt.Errorf("userinfo returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var claims map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&claims); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&claims); err != nil {
 		return nil, fmt.Errorf("decode userinfo: %w", err)
 	}
 	return claims, nil
@@ -147,23 +151,25 @@ func StringClaim(claims map[string]any, name string) string {
 }
 
 // StringsClaim returns a multi-valued claim as a string slice. A JSON array
-// is used as-is. A plain string is one value, unless delimiter is set, in
-// which case it is split on the delimiter: PingFederate emits a single
-// delimited string when a multi-valued attribute is mapped as text.
+// is used as-is: its elements are never split, so that a value such as an
+// LDAP DN, or a group name containing the delimiter, stays one value. A plain
+// string is one value, unless delimiter is set, in which case it is split on
+// the delimiter: PingFederate emits a single delimited string when a
+// multi-valued attribute is mapped as text.
 func StringsClaim(claims map[string]any, name, delimiter string) []string {
 	switch v := claims[name].(type) {
 	case []any:
 		out := make([]string, 0, len(v))
 		for _, item := range v {
 			if s, ok := item.(string); ok {
-				out = append(out, SplitValues(s, delimiter)...)
+				out = append(out, SplitValues(s, "")...)
 			}
 		}
 		return out
 	case []string:
 		var out []string
 		for _, s := range v {
-			out = append(out, SplitValues(s, delimiter)...)
+			out = append(out, SplitValues(s, "")...)
 		}
 		return out
 	case string:

@@ -111,14 +111,17 @@ func TestGetUserInfoShapesProfileAndRecordsGroups(t *testing.T) {
 		}
 	}
 
-	for _, id := range []string{"sub-1", "ada@example.com"} {
-		rec, groups := listGroups(t, s, id)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("groups(%s) status = %d: %s", id, rec.Code, rec.Body)
-		}
-		if len(groups) != 2 || groups[0].ID != "pingfederate/admins" || groups[0].Name != "admins" || groups[1].ID != "pingfederate/devs" {
-			t.Errorf("groups(%s) = %+v", id, groups)
-		}
+	rec, groups := listGroups(t, s, "sub-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("groups(sub-1) status = %d: %s", rec.Code, rec.Body)
+	}
+	if len(groups) != 2 || groups[0].ID != "pingfederate/admins" || groups[0].Name != "admins" || groups[1].ID != "pingfederate/devs" {
+		t.Errorf("groups(sub-1) = %+v", groups)
+	}
+	// Groups are recorded under the subject only: no user can choose another
+	// user's subject, but an email-like claim may be chosen or shared.
+	if rec, _ := listGroups(t, s, "ada@example.com"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("groups by email: status = %d, want 500", rec.Code)
 	}
 }
 
@@ -188,7 +191,7 @@ func TestGetUserInfoKeepsIDTokenGroupsWhenUserinfoHasNoGroupsClaim(t *testing.T)
 	var calls atomic.Int32
 	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com"})
 	s := newTestServer(t, upstream.URL, time.Minute)
-	s.rememberGroups(t.Context(), "tok", []string{"admins"}, "sub-1")
+	s.rememberGroups(t.Context(), "tok", "sub-1", []string{"admins"})
 
 	if rec, _ := getUserInfo(t, s, "Bearer tok"); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -208,7 +211,7 @@ func TestListUserAuthGroups(t *testing.T) {
 		t.Errorf("unknown id: status = %d, want 500 so Obot keeps its cached memberships", rec.Code)
 	}
 
-	s.rememberGroups(t.Context(), "tok", nil, "loner")
+	s.rememberGroups(t.Context(), "tok", "loner", nil)
 	rec, groups := listGroups(t, s, "loner")
 	if rec.Code != http.StatusOK || groups == nil || len(groups) != 0 {
 		t.Errorf("known user without groups: status = %d, groups = %#v, want an empty list", rec.Code, groups)
@@ -217,42 +220,46 @@ func TestListUserAuthGroups(t *testing.T) {
 		t.Errorf("body = %q, want []", body)
 	}
 
-	s.rememberGroups(t.Context(), "tok", []string{" ops ", "", "sec"}, "trimmed")
+	s.rememberGroups(t.Context(), "tok", "trimmed", []string{" ops ", "", "sec"})
 	if _, groups := listGroups(t, s, "trimmed\n"); len(groups) != 2 || groups[0].ID != "pingfederate/ops" || groups[1].Name != "sec" {
 		t.Errorf("groups = %+v", groups)
 	}
 }
 
 func TestRecordSession(t *testing.T) {
+	// Without a userinfo endpoint, the ID token is the only source of groups.
 	s := newTestServer(t, "", time.Minute)
 	idToken := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"sub-9","email":"z@example.com","groups":["admins","devs"]}`)) + ".s"
 
-	ss := state.SerializableState{AccessToken: "tok", IDToken: idToken, User: "z@example.com", Email: "z@example.com"}
+	ss := state.SerializableState{AccessToken: "tok", IDToken: idToken, User: "sub-9", Email: "z@example.com"}
 	s.recordSession(t.Context(), &ss)
 	if len(ss.GroupInfos) != 2 || ss.GroupInfos[0].ID != "pingfederate/admins" || ss.GroupInfos[1].Name != "devs" {
 		t.Errorf("GroupInfos from ID token claims = %+v", ss.GroupInfos)
 	}
-	for _, id := range []string{"sub-9", "z@example.com"} {
-		if rec, groups := listGroups(t, s, id); rec.Code != http.StatusOK || len(groups) != 2 {
-			t.Errorf("groups(%s): status = %d, groups = %+v", id, rec.Code, groups)
-		}
+	if rec, groups := listGroups(t, s, "sub-9"); rec.Code != http.StatusOK || len(groups) != 2 {
+		t.Errorf("groups(sub-9): status = %d, groups = %+v", rec.Code, groups)
+	}
+	if rec, _ := listGroups(t, s, "z@example.com"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("groups by email: status = %d, want 500: groups are recorded under the subject only", rec.Code)
 	}
 	if claims, ok := s.idTokenClaims.Get("tok"); !ok || claims["sub"] != "sub-9" {
 		t.Errorf("ID token claims not cached by access token: %v %v", claims, ok)
 	}
 
-	// Groups oauth2-proxy already extracted take precedence over the token.
-	ss = state.SerializableState{AccessToken: "tok2", IDToken: idToken, User: "z@example.com", Groups: []string{"from-session"}}
+	// The session's own group list is not used: oauth2-proxy keeps it from
+	// sign-in, and it loses the claim's type.
+	ss = state.SerializableState{AccessToken: "tok2", IDToken: idToken, User: "sub-9", Groups: []string{"from-session"}}
 	s.recordSession(t.Context(), &ss)
-	if len(ss.GroupInfos) != 1 || ss.GroupInfos[0].ID != "pingfederate/from-session" {
-		t.Errorf("GroupInfos = %+v, want the session groups", ss.GroupInfos)
+	if got := groupNames(ss.GroupInfos); got != "pingfederate/admins=admins,pingfederate/devs=devs" {
+		t.Errorf("GroupInfos = %q, want the ID token's", got)
 	}
 
-	// A session without an ID token (refreshed without one) still records groups.
+	// A session without an ID token falls back to the session's user, which
+	// oauth2-proxy sets to the subject, and records no groups.
 	ss = state.SerializableState{AccessToken: "tok3", User: "u", Groups: []string{"g"}}
 	s.recordSession(t.Context(), &ss)
-	if _, groups := listGroups(t, s, "u"); len(groups) != 1 {
-		t.Errorf("groups without ID token = %+v", groups)
+	if rec, groups := listGroups(t, s, "u"); rec.Code != http.StatusOK || len(groups) != 0 {
+		t.Errorf("groups without ID token: status = %d, groups = %+v", rec.Code, groups)
 	}
 	if _, ok := s.idTokenClaims.Get("tok3"); ok {
 		t.Error("no claims should be cached without an ID token")
@@ -264,44 +271,53 @@ func TestRecordSession(t *testing.T) {
 	if rec, groups := listGroups(t, s, "v"); rec.Code != http.StatusOK || len(groups) != 0 {
 		t.Errorf("garbage token: status = %d, groups = %+v", rec.Code, groups)
 	}
+
+	// Nothing identifies the user: nothing is recorded.
+	ss = state.SerializableState{AccessToken: "tok5"}
+	s.recordSession(t.Context(), &ss)
+	if rec, _ := listGroups(t, s, ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("empty id: status = %d", rec.Code)
+	}
 }
 
 func TestRecordSessionSplitsDelimitedGroups(t *testing.T) {
 	s := newTestServer(t, "", time.Minute)
 	s.cfg.GroupsDelimiter = ","
-	idToken := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"sub-d","groups":"Domain Admins, devs"}`)) + ".s"
-
-	ss := state.SerializableState{AccessToken: "tok", IDToken: idToken, User: "d"}
-	s.recordSession(t.Context(), &ss)
-	if len(ss.GroupInfos) != 2 || ss.GroupInfos[0].Name != "Domain Admins" || ss.GroupInfos[1].Name != "devs" {
-		t.Errorf("GroupInfos from delimited claim = %+v", ss.GroupInfos)
+	record := func(groupsJSON string) state.GroupInfoList {
+		t.Helper()
+		idToken := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"sub-d","groups":`+groupsJSON+`}`)) + ".s"
+		ss := state.SerializableState{AccessToken: "tok-" + groupsJSON, IDToken: idToken}
+		s.recordSession(t.Context(), &ss)
+		return ss.GroupInfos
 	}
 
-	// oauth2-proxy hands a delimited string claim over as a single group.
-	ss = state.SerializableState{AccessToken: "tok2", User: "d2", Groups: []string{"ops,sec"}}
-	s.recordSession(t.Context(), &ss)
-	if len(ss.GroupInfos) != 2 || ss.GroupInfos[0].ID != "pingfederate/ops" || ss.GroupInfos[1].ID != "pingfederate/sec" {
-		t.Errorf("GroupInfos from delimited session groups = %+v", ss.GroupInfos)
+	// A single delimited string is split.
+	if got := groupNames(record(`"Domain Admins, devs"`)); got != "pingfederate/Domain Admins=Domain Admins,pingfederate/devs=devs" {
+		t.Errorf("GroupInfos from delimited string = %q", got)
+	}
+	// A list is never split, so an element containing the delimiter, such as
+	// an LDAP DN, cannot turn into other groups.
+	if got := groupNames(record(`["cn=x,ou=admins", "devs"]`)); got != "pingfederate/cn=x,ou=admins=cn=x,ou=admins,pingfederate/devs=devs" {
+		t.Errorf("GroupInfos from a list = %q, want each element kept whole", got)
 	}
 
 	s.cfg.GroupsDelimiter = ""
-	ss = state.SerializableState{AccessToken: "tok3", User: "d3", Groups: []string{"CN=Admins,OU=Groups"}}
-	s.recordSession(t.Context(), &ss)
-	if len(ss.GroupInfos) != 1 || ss.GroupInfos[0].Name != "CN=Admins,OU=Groups" {
-		t.Errorf("GroupInfos without delimiter = %+v, want the value kept whole", ss.GroupInfos)
+	if got := groupNames(record(`"CN=Admins,OU=Groups"`)); got != "pingfederate/CN=Admins,OU=Groups=CN=Admins,OU=Groups" {
+		t.Errorf("GroupInfos without delimiter = %q, want the value kept whole", got)
 	}
 }
 
-func TestProfileIDFallbacks(t *testing.T) {
+func TestProfileID(t *testing.T) {
 	s := newTestServer(t, "", time.Minute)
 	if p := s.profile(map[string]any{"sub": "s", "email": "e"}); p["id"] != "s" {
 		t.Errorf("id = %v, want sub", p["id"])
 	}
-	if p := s.profile(map[string]any{"email": "e"}); p["id"] != "e" {
-		t.Errorf("id = %v, want the email claim", p["id"])
+	// Groups are recorded under the subject only, so the email is never an id.
+	if p := s.profile(map[string]any{"email": "e"}); p["id"] != "" {
+		t.Errorf("id = %v, want none without a subject", p["id"])
 	}
 	s.cfg.EmailClaim = "mail"
-	if p := s.profile(map[string]any{"mail": "m", "email": "e"}); p["id"] != "m" || p["email"] != "m" || p["name"] != "m" {
+	if p := s.profile(map[string]any{"sub": "s", "mail": "m", "email": "e"}); p["id"] != "s" || p["email"] != "m" || p["name"] != "m" {
 		t.Errorf("custom email claim: %v", p)
 	}
 	if p := s.profile(map[string]any{}); p["id"] != "" || p["name"] != "" {

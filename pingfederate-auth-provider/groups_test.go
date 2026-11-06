@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,7 +21,11 @@ import (
 )
 
 func idTokenWithGroups(groups ...string) string {
-	claims, _ := json.Marshal(map[string]any{"sub": "sub-1", "email": "ada@example.com", "groups": groups})
+	return idTokenFor("sub-1", groups...)
+}
+
+func idTokenFor(subject string, groups ...string) string {
+	claims, _ := json.Marshal(map[string]any{"sub": subject, "email": "ada@example.com", "groups": groups})
 	return "h." + base64.RawURLEncoding.EncodeToString(claims) + ".s"
 }
 
@@ -366,6 +373,163 @@ func TestPostgresGroupStoreDoesNotRecreateDroppedTables(t *testing.T) {
 	for _, table := range []string{userGroupsTable, seenGroupsTable} {
 		if store.db.Migrator().HasTable(table) {
 			t.Errorf("table %s was recreated", table)
+		}
+	}
+}
+
+// A failing userinfo answer must not replace a user's recorded groups with the
+// session's: those are from sign-in, and may include groups since removed.
+// This also covers the session helper handing back a refreshed session's old,
+// expired access token, which userinfo rejects.
+func TestUserinfoFailureKeepsRecordedGroups(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Authorization") != "Bearer fresh" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"sub": "sub-1", "groups": []any{"devs"}})
+	}))
+	t.Cleanup(upstream.Close)
+	s := newTestServer(t, upstream.URL, time.Minute)
+
+	// The current groups, read with a fresh token, are recorded.
+	ss := state.SerializableState{AccessToken: "fresh", IDToken: idTokenWithGroups("admins", "devs")}
+	s.recordSession(t.Context(), &ss)
+	if got := recordedGroups(t, s, "sub-1"); got != "pingfederate/devs=devs" {
+		t.Fatalf("recorded groups = %q", got)
+	}
+
+	// A request with the old token: userinfo fails, and the sign-in groups
+	// (still holding admins) must not overwrite the record.
+	ss = state.SerializableState{AccessToken: "expired", IDToken: idTokenWithGroups("admins", "devs")}
+	s.recordSession(t.Context(), &ss)
+	if got := recordedGroups(t, s, "sub-1"); got != "pingfederate/devs=devs" {
+		t.Errorf("recorded groups after a userinfo failure = %q, want them kept", got)
+	}
+
+	// Obot's profile request with the old token answers from the cached ID
+	// token claims, and must not record their groups either.
+	if rec, _ := getUserInfo(t, s, "Bearer expired"); rec.Code != http.StatusOK {
+		t.Fatalf("user info with the old token: status = %d", rec.Code)
+	}
+	if got := recordedGroups(t, s, "sub-1"); got != "pingfederate/devs=devs" {
+		t.Errorf("recorded groups after the profile fallback = %q, want them kept", got)
+	}
+
+	// A user never recorded stays unrecorded, so Obot keeps what it has
+	// rather than taking the session's groups as current.
+	ss = state.SerializableState{AccessToken: "expired-2", IDToken: idTokenFor("sub-2", "admins")}
+	s.recordSession(t.Context(), &ss)
+	if rec, _ := listGroups(t, s, "sub-2"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("unrecorded user after a userinfo failure: status = %d, want 500", rec.Code)
+	}
+}
+
+// Userinfo must answer for the session's subject before its groups are used.
+func TestUserinfoForAnotherSubjectIsIgnored(t *testing.T) {
+	var calls atomic.Int32
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "someone-else", "groups": []any{"admins"}})
+	s := newTestServer(t, upstream.URL, time.Minute)
+
+	ss := state.SerializableState{AccessToken: "tok", IDToken: idTokenWithGroups("devs")}
+	s.recordSession(t.Context(), &ss)
+	if rec, _ := listGroups(t, s, "sub-1"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("groups(sub-1): status = %d, want nothing recorded", rec.Code)
+	}
+	if rec, _ := listGroups(t, s, "someone-else"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("groups(someone-else): status = %d, want nothing recorded", rec.Code)
+	}
+}
+
+func TestValidateEndpointURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{name: "https", url: "https://sso.example.com:9031"},
+		{name: "http on localhost", url: "http://localhost:9031"},
+		{name: "http on IPv4 loopback", url: "http://127.0.0.1:9031/as/token.oauth2"},
+		{name: "http on IPv6 loopback", url: "http://[::1]:9031"},
+		{name: "http elsewhere", url: "http://sso.example.com", wantErr: true},
+		{name: "http on a private address", url: "http://10.0.0.5", wantErr: true},
+		{name: "credentials", url: "https://user:pass@sso.example.com", wantErr: true},
+		{name: "relative", url: "/as/token.oauth2", wantErr: true},
+		{name: "other scheme", url: "ftp://sso.example.com", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateEndpointURL("endpoint", tt.url); (err != nil) != tt.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// The in-memory store lists the most recently seen groups first, forgets
+// groups not seen for seenGroupsTTL, and drops the least recently seen when
+// full, like the PostgreSQL store.
+func TestMemoryGroupStoreSeenGroups(t *testing.T) {
+	store := newMemoryGroupStore()
+	ctx := t.Context()
+	now := time.Now()
+	store.now = func() time.Time { return now }
+	if err := store.addSeenGroups(ctx, []string{"old", "kept"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if err := store.addSeenGroups(ctx, []string{"new", "kept"}); err != nil {
+		t.Fatal(err)
+	}
+	if seen, _ := store.seenGroups(ctx); strings.Join(seen, ",") != "kept,new,old" {
+		t.Errorf("seen = %v, want the recently seen first, a repeat sighting counting as recent", seen)
+	}
+
+	now = now.Add(seenGroupsTTL - 30*time.Minute)
+	if seen, _ := store.seenGroups(ctx); strings.Join(seen, ",") != "kept,new" {
+		t.Errorf("seen = %v, want old expired", seen)
+	}
+
+	for i := range maxSeenGroups {
+		now = now.Add(time.Millisecond)
+		if err := store.addSeenGroups(ctx, []string{fmt.Sprintf("g%05d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen, _ := store.seenGroups(ctx)
+	if len(seen) != maxSeenGroups || slices.Contains(seen, "kept") || slices.Contains(seen, "new") {
+		t.Errorf("full store holds %d groups; the least recently seen should have been dropped", len(seen))
+	}
+}
+
+// Every replica starts the provider at once when it is first configured; all
+// of them must manage to open the store.
+func TestPostgresGroupStoreConcurrentStart(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	errs := make(chan error, 4)
+	for range cap(errs) {
+		go func() {
+			o := validOptions()
+			o.PostgresConnectionDSN = dsn
+			cfg, err := o.resolve()
+			if err != nil {
+				errs <- err
+				return
+			}
+			store, err := openPostgresGroupStore(cfg)
+			if err == nil {
+				if sqlDB, dbErr := store.db.DB(); dbErr == nil {
+					_ = sqlDB.Close()
+				}
+			}
+			errs <- err
+		}()
+	}
+	for range cap(errs) {
+		if err := <-errs; err != nil {
+			t.Errorf("open store: %v", err)
 		}
 	}
 }

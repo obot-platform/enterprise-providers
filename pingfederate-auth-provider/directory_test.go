@@ -41,7 +41,7 @@ func TestDirectoryListsKnownAndSeenGroups(t *testing.T) {
 		t.Errorf("declared groups = %q", got)
 	}
 
-	s.rememberGroups(t.Context(), "tok", []string{"devs", "LDAP-Obot-Admins"}, "sub-1")
+	s.rememberGroups(t.Context(), "tok", "sub-1", []string{"devs", "LDAP-Obot-Admins"})
 	_, items, _ = listAuthGroups(t, s, "")
 	if got := groupNames(items); got != "pingfederate/devs=devs,pingfederate/LDAP-Obot-Admins=LDAP-Obot-Admins,pingfederate/LDAP-Obot-Auditors=LDAP-Obot-Auditors" {
 		t.Errorf("groups after sign-in = %q", got)
@@ -132,8 +132,9 @@ func TestGetAuthGroupsResolvesIDsInNamespace(t *testing.T) {
 }
 
 func TestSplitLines(t *testing.T) {
-	got := splitLines("LDAP-Admins, LDAP-Auditors\n\n Domain Users \r\nLDAP-Admins")
-	if strings.Join(got, "|") != "LDAP-Admins|LDAP-Auditors|Domain Users" {
+	// One per line; commas belong to the name, as in an LDAP DN.
+	got := splitLines("LDAP-Admins\ncn=engineering,ou=groups,dc=example,dc=com\n\n Domain Users \r\nLDAP-Admins")
+	if strings.Join(got, "|") != "LDAP-Admins|cn=engineering,ou=groups,dc=example,dc=com|Domain Users" {
 		t.Errorf("splitLines = %v", got)
 	}
 	if splitLines("") != nil {

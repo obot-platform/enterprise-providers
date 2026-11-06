@@ -48,7 +48,9 @@ profile, and list their groups.
   accepted when the ID token does not carry `email_verified`, which
   PingFederate typically omits. An explicit `email_verified: false` is
   rejected, because an unverified address would otherwise satisfy the allowed
-  email domains. The check applies only when the email claim is `email`.
+  email domains. The check applies only when the email claim is `email`: with
+  another **Email Claim**, make sure users cannot set that attribute
+  themselves, or the allowed email domains no longer restrict who signs in.
 - **Name Claim** chooses the claim shown in **Identity & Access → Users → Name**
   (default: `name`). If missing, the provider falls back to `name`, then
   `given_name` + `family_name`, then `preferred_username`, then the email.
@@ -87,8 +89,18 @@ created with, and PingFederate does not issue a new ID token on refresh by
 default. So the provider asks userinfo for the user's groups once per access
 token, and each refresh brings a new token: a change to a user's groups in
 PingFederate reaches Obot within one **Token Refresh Duration**, without the
-user signing in again. When userinfo carries no groups claim (groups released
-only in the ID token), the session's groups are used.
+user signing in again. Release the groups attribute in userinfo for this to
+work. When userinfo carries no groups claim (groups released only in the ID
+token), the ID token's groups are used, and they change only when PingFederate
+issues a new ID token: at sign-in, or on refresh if the OpenID Connect policy
+returns an ID token on the refresh grant.
+
+Groups are recorded only from a successful userinfo answer for the session's
+subject. If userinfo fails, nothing is recorded, and the user's existing record
+stands: the session's own groups are from sign-in, and may include groups the
+user has since lost. A user's groups are recorded under their subject only, the
+identifier Obot looks them up by, never under an email address or another
+attribute a user might share or choose.
 
 **Where groups are recorded.** Every Obot replica runs its own copy of the
 provider, so the records must be shared. When Obot uses PostgreSQL, which a
@@ -97,11 +109,12 @@ in two tables declared in the manifest's `postgresTables`:
 
 | Table | Holds |
 |---|---|
-| `pingfederate_user_groups` | Each user's groups, under every identifier Obot may look them up by. A record expires 24 hours after it was last written. |
+| `pingfederate_user_groups` | Each user's groups, under their subject. A record expires 24 hours after it was last written. |
 | `pingfederate_seen_groups` | Every group recorded at sign-in, for the group picker. A group expires 90 days after it was last seen. |
 
 The provider creates the tables when it starts, and only then: Obot drops them,
-with the session tables, when the provider is deconfigured, and a provider
+with the session tables, when the provider is deconfigured or a staged switch
+to it is discarded, and a provider
 still running on another replica must not bring them back. It writes a user's
 record when it sees the user with a new access token, and renews it hourly,
 rather than on every request. Expired rows are deleted hourly.
@@ -112,6 +125,7 @@ Obot keeps the memberships it already has in the meantime.
 
 **The group picker** lists **Known Groups** plus the groups recorded at
 sign-in. List every group you intend to map to a role under **Known Groups**,
+one per line (commas belong to the name, as in an LDAP DN),
 so the picker offers it before any member has signed in.
 
 ## Security checks
@@ -120,7 +134,9 @@ PingFederate is a certified OpenID provider, so the provider applies the
 standard OpenID Connect checks and none of them can be turned off: it reads
 the discovery document, requires its `issuer` to match the configured issuer
 URL, sends and verifies a nonce, uses `S256` PKCE, accepts ID tokens only for
-the client ID, and rejects an explicit `email_verified: false`.
+the client ID, and rejects an explicit `email_verified: false`. The issuer and
+every endpoint in the discovery document must use HTTPS, except on a loopback
+host.
 
 ## Configuration
 
@@ -146,7 +162,7 @@ Optional (defaults in parentheses):
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM` | Name claim for the Users Name column (`name`) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM` | Groups claim (`groups`) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER` | Delimiter when groups arrive as one string (none) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS` | Groups to list in Obot's group picker up front, one per line or comma-separated (none) |
+| `OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS` | Groups to list in Obot's group picker up front, one per line (none) |
 | `OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL` | Profile cache lifetime (`5m`), `0` disables |
 | `OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION` | Refresh upstream tokens after this age (`1h`) |
 | `OBOT_AUTH_PROVIDER_ENABLE_LOGGING` | oauth2-proxy request and auth logging (`false`) |
