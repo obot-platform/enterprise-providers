@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,6 +52,8 @@ func tokenGroupsTTL(cfg *settings) time.Duration {
 
 // userinfoGroups is what userinfo reported about an access token's groups.
 type userinfoGroups struct {
+	// observedAt is when userinfo answered.
+	observedAt time.Time
 	// subject is the subject userinfo answered for.
 	subject string
 	groups  []string
@@ -90,7 +90,7 @@ type server struct {
 	idTokenClaims *expirable.LRU[string, map[string]any]
 	// userinfo caches userinfo responses by access token. Obot asks for the
 	// profile on nearly every request, and PingFederate should not see that.
-	userinfo *expirable.LRU[string, map[string]any]
+	userinfo *expirable.LRU[string, userinfoAnswer]
 	// directory answers Obot's group search and lookups.
 	directory *groupDirectory
 }
@@ -159,7 +159,7 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 		directory:         newGroupDirectory(cfg.knownGroups, store),
 	}
 	if cfg.userinfoCacheTTL > 0 {
-		s.userinfo = expirable.NewLRU[string, map[string]any](cacheSize, nil, cfg.userinfoCacheTTL)
+		s.userinfo = expirable.NewLRU[string, userinfoAnswer](cacheSize, nil, cfg.userinfoCacheTTL)
 	}
 	return s, nil
 }
@@ -331,7 +331,7 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 		subject = ss.User
 	}
 
-	groups, record := s.sessionGroups(ctx, ss.AccessToken, subject, claims)
+	groups, observedAt, record := s.sessionGroups(ctx, ss.AccessToken, subject, claims)
 	ss.GroupInfos = groupInfos(groups)
 	// The state of a request that refreshed the session is the session from
 	// before the refresh, with its old access token; the refreshed one comes
@@ -342,7 +342,7 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 		record = false
 	}
 	if record {
-		s.rememberGroups(ctx, ss.AccessToken, subject, groups)
+		s.rememberGroups(ctx, subject, groups, observedAt)
 	}
 	if ss.AccessToken != "" && len(claims) > 0 {
 		s.idTokenClaims.Add(ss.AccessToken, claims)
@@ -360,22 +360,24 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 // record another request or replica wrote is likely fresher. Only when userinfo
 // carries no groups claim at all (groups released in the ID token alone) are
 // the ID token's groups recorded.
-func (s *server) sessionGroups(ctx context.Context, token, subject string, idTokenClaims map[string]any) ([]string, bool) {
+func (s *server) sessionGroups(ctx context.Context, token, subject string, idTokenClaims map[string]any) ([]string, time.Time, bool) {
 	tokenGroups := oidc.StringsClaim(idTokenClaims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
+	// The ID token's groups were observed when it was issued.
+	tokenIssued := oidc.TimeClaim(idTokenClaims, "iat")
 	if subject == "" {
-		return tokenGroups, false
+		return tokenGroups, tokenIssued, false
 	}
 	if s.userinfoURL == "" {
-		return tokenGroups, true
+		return tokenGroups, tokenIssued, true
 	}
 	current, ok := s.currentGroups(ctx, token, subject)
 	switch {
 	case !ok:
-		return tokenGroups, false
+		return tokenGroups, tokenIssued, false
 	case current.present:
-		return current.groups, true
+		return current.groups, current.observedAt, true
 	default:
-		return tokenGroups, true
+		return tokenGroups, tokenIssued, true
 	}
 }
 
@@ -393,13 +395,13 @@ func (s *server) currentGroups(ctx context.Context, token, subject string) (user
 	if _, failed := s.tokenGroupsFailed.Get(token); failed {
 		return userinfoGroups{}, false
 	}
-	claims, err := s.userinfoClaims(ctx, token)
+	claims, answeredAt, err := s.userinfoClaims(ctx, token)
 	if err != nil {
 		slog.Warn("could not read the user's current groups from userinfo; keeping their recorded groups", "error", err)
 		s.tokenGroupsFailed.Add(token, struct{}{})
 		return userinfoGroups{}, false
 	}
-	result := userinfoGroups{subject: oidc.StringClaim(claims, "sub")}
+	result := userinfoGroups{subject: oidc.StringClaim(claims, "sub"), observedAt: answeredAt}
 	if _, result.present = claims[s.cfg.GroupsClaim]; result.present {
 		result.groups = oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
 	}
@@ -423,7 +425,7 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := s.userinfoClaims(r.Context(), token)
+	claims, answeredAt, err := s.userinfoClaims(r.Context(), token)
 	fromUserinfo := err == nil
 	if err != nil {
 		cached, ok := s.idTokenClaims.Get(token)
@@ -455,7 +457,7 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 	if _, ok := claims[s.cfg.GroupsClaim]; ok && fromUserinfo && subject != "" {
 		if cached, known := s.idTokenClaims.Get(token); !known || oidc.StringClaim(cached, "sub") == subject {
 			groups := oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
-			s.rememberGroups(r.Context(), token, subject, groups)
+			s.rememberGroups(r.Context(), subject, groups, answeredAt)
 		}
 	}
 
@@ -466,24 +468,31 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // userinfoClaims fetches the userinfo document for an access token, through
-// the cache when one is configured.
-func (s *server) userinfoClaims(ctx context.Context, token string) (map[string]any, error) {
+// the cache when one is configured, and returns when PingFederate gave it.
+func (s *server) userinfoClaims(ctx context.Context, token string) (map[string]any, time.Time, error) {
 	if s.userinfoURL == "" {
-		return nil, fmt.Errorf("no userinfo endpoint is configured")
+		return nil, time.Time{}, fmt.Errorf("no userinfo endpoint is configured")
 	}
 	if s.userinfo != nil {
-		if claims, ok := s.userinfo.Get(token); ok {
-			return claims, nil
+		if answer, ok := s.userinfo.Get(token); ok {
+			return answer.claims, answer.at, nil
 		}
 	}
 	claims, err := oidc.Userinfo(ctx, s.httpClient, s.userinfoURL, token)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
+	at := time.Now()
 	if s.userinfo != nil {
-		s.userinfo.Add(token, claims)
+		s.userinfo.Add(token, userinfoAnswer{claims: claims, at: at})
 	}
-	return claims, nil
+	return claims, at, nil
+}
+
+// userinfoAnswer is a userinfo response and when PingFederate gave it.
+type userinfoAnswer struct {
+	claims map[string]any
+	at     time.Time
 }
 
 // profile shapes claims into the document Obot expects from
@@ -538,31 +547,18 @@ func (s *server) listUserAuthGroups(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// rememberGroups records the group list, read with accessToken, under the
+// rememberGroups records the group list, observed at observedAt, under the
 // user's subject: the identifier Obot looks a user's groups up by, and the
 // only one, since no user can choose another's. A failure is logged rather
 // than failing the request: Obot keeps the memberships it has when a later
 // lookup finds nothing.
-func (s *server) rememberGroups(ctx context.Context, accessToken, subject string, groups []string) {
+func (s *server) rememberGroups(ctx context.Context, subject string, groups []string, observedAt time.Time) {
 	if subject == "" {
 		return
 	}
-	stored := filterGroups(groups)
-	if err := s.store.setUserGroups(ctx, []string{subject}, stored, tokenFingerprint(accessToken)); err != nil {
+	if err := s.store.recordUserGroups(ctx, subject, filterGroups(groups), observedAt); err != nil {
 		slog.Warn("failed to record the user's groups", "error", err)
 	}
-	if err := s.store.addSeenGroups(ctx, stored); err != nil {
-		slog.Warn("failed to record seen groups", "error", err)
-	}
-}
-
-// tokenFingerprint identifies an access token without keeping it.
-func tokenFingerprint(token string) string {
-	if token == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:8])
 }
 
 // groupInfos converts raw group names into Obot's group documents, with the

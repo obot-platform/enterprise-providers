@@ -144,6 +144,20 @@ func UnverifiedClaims(token string) (map[string]any, error) {
 	return claims, nil
 }
 
+// TimeClaim returns a NumericDate claim, such as iat, as a time, or the zero
+// time when absent or not a number.
+func TimeClaim(claims map[string]any, name string) time.Time {
+	switch v := claims[name].(type) {
+	case float64:
+		return time.Unix(0, int64(v*float64(time.Second)))
+	case json.Number:
+		if f, err := v.Float64(); err == nil {
+			return time.Unix(0, int64(f*float64(time.Second)))
+		}
+	}
+	return time.Time{}
+}
+
 // StringClaim returns claim as a string, or "" when absent or not a string.
 func StringClaim(claims map[string]any, name string) string {
 	s, _ := claims[name].(string)

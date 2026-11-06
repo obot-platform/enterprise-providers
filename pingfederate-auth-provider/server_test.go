@@ -36,7 +36,7 @@ func newTestServer(t *testing.T, userinfoURL string, cacheTTL time.Duration) *se
 	}
 	s.directory = newGroupDirectory(cfg.knownGroups, s.store)
 	if cacheTTL > 0 {
-		s.userinfo = expirable.NewLRU[string, map[string]any](cacheSize, nil, cacheTTL)
+		s.userinfo = expirable.NewLRU[string, userinfoAnswer](cacheSize, nil, cacheTTL)
 	}
 	return s
 }
@@ -191,7 +191,7 @@ func TestGetUserInfoKeepsIDTokenGroupsWhenUserinfoHasNoGroupsClaim(t *testing.T)
 	var calls atomic.Int32
 	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com"})
 	s := newTestServer(t, upstream.URL, time.Minute)
-	s.rememberGroups(t.Context(), "tok", "sub-1", []string{"admins"})
+	s.rememberGroups(t.Context(), "sub-1", []string{"admins"}, time.Now())
 
 	if rec, _ := getUserInfo(t, s, "Bearer tok"); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -211,7 +211,7 @@ func TestListUserAuthGroups(t *testing.T) {
 		t.Errorf("unknown id: status = %d, want 500 so Obot keeps its cached memberships", rec.Code)
 	}
 
-	s.rememberGroups(t.Context(), "tok", "loner", nil)
+	s.rememberGroups(t.Context(), "loner", nil, time.Now())
 	rec, groups := listGroups(t, s, "loner")
 	if rec.Code != http.StatusOK || groups == nil || len(groups) != 0 {
 		t.Errorf("known user without groups: status = %d, groups = %#v, want an empty list", rec.Code, groups)
@@ -220,7 +220,7 @@ func TestListUserAuthGroups(t *testing.T) {
 		t.Errorf("body = %q, want []", body)
 	}
 
-	s.rememberGroups(t.Context(), "tok", "trimmed", []string{" ops ", "", "sec"})
+	s.rememberGroups(t.Context(), "trimmed", []string{" ops ", "", "sec"}, time.Now())
 	if _, groups := listGroups(t, s, "trimmed\n"); len(groups) != 2 || groups[0].ID != "pingfederate/ops" || groups[1].Name != "sec" {
 		t.Errorf("groups = %+v", groups)
 	}

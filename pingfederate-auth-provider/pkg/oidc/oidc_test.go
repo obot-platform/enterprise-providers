@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func jwt(t *testing.T, claims map[string]any) string {
@@ -200,5 +201,17 @@ func TestNewHTTPClientTrustsCAFile(t *testing.T) {
 	}
 	if _, err := NewHTTPClient([]string{empty}); err == nil {
 		t.Error("expected an error for a CA file without certificates")
+	}
+}
+
+func TestTimeClaim(t *testing.T) {
+	if got := TimeClaim(map[string]any{"iat": float64(1793910152)}, "iat"); !got.Equal(time.Unix(1793910152, 0)) {
+		t.Errorf("iat = %v", got)
+	}
+	if got := TimeClaim(map[string]any{"iat": "soon"}, "iat"); !got.IsZero() {
+		t.Errorf("non-numeric iat = %v, want zero", got)
+	}
+	if got := TimeClaim(map[string]any{}, "iat"); !got.IsZero() {
+		t.Errorf("missing iat = %v, want zero", got)
 	}
 }

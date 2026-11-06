@@ -41,7 +41,7 @@ func TestDirectoryListsKnownAndSeenGroups(t *testing.T) {
 		t.Errorf("declared groups = %q", got)
 	}
 
-	s.rememberGroups(t.Context(), "tok", "sub-1", []string{"devs", "LDAP-Obot-Admins"})
+	s.rememberGroups(t.Context(), "sub-1", []string{"devs", "LDAP-Obot-Admins"}, time.Now())
 	_, items, _ = listAuthGroups(t, s, "")
 	if got := groupNames(items); got != "pingfederate/devs=devs,pingfederate/LDAP-Obot-Admins=LDAP-Obot-Admins,pingfederate/LDAP-Obot-Auditors=LDAP-Obot-Auditors" {
 		t.Errorf("groups after sign-in = %q", got)

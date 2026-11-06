@@ -14,7 +14,6 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -38,9 +37,10 @@ const (
 	// maxSeenGroups bounds the groups listed in the group picker, besides the
 	// declared ones.
 	maxSeenGroups = 10000
-	// rewriteInterval is how often an unchanged record is written again, to
-	// keep it from expiring. A change is written at once.
-	rewriteInterval = time.Hour
+	// renewInterval is how often a record that has not changed is written
+	// again, to keep an active user's record, or a group in use, from
+	// expiring. Anything newer is written at once.
+	renewInterval = time.Hour
 	// pruneInterval is how often expired rows are deleted.
 	pruneInterval = time.Hour
 )
@@ -51,15 +51,15 @@ const (
 // store must be shared: postgresGroupStore. Without a database, memoryGroupStore
 // keeps the same records in this process.
 type groupStore interface {
-	// setUserGroups records groups for a user under each of keys. source
-	// identifies the observation, normally a fingerprint of the access token
-	// the groups were read with: a user's groups change only with a new
-	// token, so a repeat from the same source need not be written again.
-	setUserGroups(ctx context.Context, keys, groups []string, source string) error
+	// recordUserGroups records a user's groups, as observed at observedAt:
+	// when userinfo answered, or when the ID token they came from was issued.
+	// An observation older than the one recorded is ignored, so that a
+	// replica holding an older answer cannot overwrite a newer one, whatever
+	// order the writes arrive in. It also records that the groups exist, for
+	// the group picker.
+	recordUserGroups(ctx context.Context, key string, groups []string, observedAt time.Time) error
 	// userGroups returns the groups recorded for key, and whether any are.
 	userGroups(ctx context.Context, key string) ([]string, bool, error)
-	// addSeenGroups records that groups exist.
-	addSeenGroups(ctx context.Context, groups []string) error
 	// seenGroups returns the recorded groups, most recently seen first, up
 	// to maxSeenGroups.
 	seenGroups(ctx context.Context) ([]string, error)
@@ -68,7 +68,7 @@ type groupStore interface {
 // memoryGroupStore keeps the records in this process. It loses them on a
 // restart and does not share them with other replicas.
 type memoryGroupStore struct {
-	users *expirable.LRU[string, []string]
+	users *expirable.LRU[string, observedGroups]
 
 	mu   sync.Mutex
 	seen map[string]time.Time // group name -> when it was last seen
@@ -77,22 +77,30 @@ type memoryGroupStore struct {
 
 func newMemoryGroupStore() *memoryGroupStore {
 	return &memoryGroupStore{
-		users: expirable.NewLRU[string, []string](cacheSize, nil, userGroupsTTL),
+		users: expirable.NewLRU[string, observedGroups](cacheSize, nil, userGroupsTTL),
 		seen:  map[string]time.Time{},
 		now:   time.Now,
 	}
 }
 
-func (m *memoryGroupStore) setUserGroups(_ context.Context, keys, groups []string, _ string) error {
-	for _, key := range keys {
-		m.users.Add(key, groups)
+// observedGroups is a user's groups as observed at a point in time.
+type observedGroups struct {
+	groups     []string
+	observedAt time.Time
+}
+
+func (m *memoryGroupStore) recordUserGroups(ctx context.Context, key string, groups []string, observedAt time.Time) error {
+	m.mu.Lock()
+	if current, ok := m.users.Peek(key); !ok || !observedAt.Before(current.observedAt) {
+		m.users.Add(key, observedGroups{groups: groups, observedAt: observedAt})
 	}
-	return nil
+	m.mu.Unlock()
+	return m.addSeenGroups(ctx, groups)
 }
 
 func (m *memoryGroupStore) userGroups(_ context.Context, key string) ([]string, bool, error) {
-	groups, ok := m.users.Get(key)
-	return groups, ok, nil
+	current, ok := m.users.Get(key)
+	return current.groups, ok, nil
 }
 
 func (m *memoryGroupStore) addSeenGroups(_ context.Context, groups []string) error {
@@ -139,8 +147,11 @@ func (m *memoryGroupStore) seenGroups(context.Context) ([]string, error) {
 }
 
 type userGroupsRow struct {
-	UserKey   string    `gorm:"primaryKey"`
-	Groups    string    // a JSON array of group names
+	UserKey string `gorm:"primaryKey"`
+	Groups  string // a JSON array of group names
+	// ObservedAt is when the groups were observed, which orders writes.
+	ObservedAt time.Time
+	// UpdatedAt is when the row was last written, which expires it.
 	UpdatedAt time.Time `gorm:"index"`
 }
 
@@ -151,18 +162,14 @@ type seenGroupRow struct {
 
 // postgresGroupStore keeps the records in Obot's database, shared by every
 // replica and kept across restarts.
+//
+// Writes are conditional upserts, so that whether a row changes is decided by
+// PostgreSQL, atomically, from what the row holds, and not by anything a
+// replica remembers. A request that brings nothing newer than the row matches
+// no condition, and PostgreSQL leaves the row as it is.
 type postgresGroupStore struct {
-	db *gorm.DB
-	// written remembers what this process last wrote for a key, from which
-	// observation, and when, so that the request path writes only new
-	// observations and occasional renewals rather than on every request.
-	written *expirable.LRU[string, writtenRecord]
-	now     func() time.Time
-}
-
-type writtenRecord struct {
-	value string
-	at    time.Time
+	db  *gorm.DB
+	now func() time.Time
 }
 
 // openPostgresGroupStore connects to Obot's database and creates the tables.
@@ -193,11 +200,7 @@ func openPostgresGroupStore(cfg *settings) (*postgresGroupStore, error) {
 	if err := migrateWithRetry(db, seenGroupsTable, &seenGroupRow{}); err != nil {
 		return nil, err
 	}
-	return &postgresGroupStore{
-		db:      db,
-		written: expirable.NewLRU[string, writtenRecord](cacheSize, nil, rewriteInterval),
-		now:     time.Now,
-	}, nil
+	return &postgresGroupStore{db: db, now: time.Now}, nil
 }
 
 // migrateWithRetry creates or updates a table. Every replica starts the
@@ -217,43 +220,58 @@ func migrateWithRetry(db *gorm.DB, table string, model any) error {
 	return fmt.Errorf("create table %s: %w", table, err)
 }
 
-// due reports whether value must be written for key: it is new, or it was
-// last written long enough ago that it needs renewing.
-//
-// A value is new when it differs from what this process last wrote, or comes
-// from another observation. Comparing values alone is not enough with several
-// replicas: if this one wrote X, another then wrote Y, and the user's groups
-// changed back to X, skipping the identical X would leave Y in place.
-func (p *postgresGroupStore) due(key, value string) bool {
-	last, ok := p.written.Get(key)
-	return !ok || last.value != value || p.now().Sub(last.at) >= rewriteInterval
-}
+// upsertUserGroups writes a user's groups if the observation is newer than the
+// recorded one, or if it is the same observation and the row is due for
+// renewal. The renewal keeps an active user's row from expiring when the
+// observation cannot get newer, as with groups released only in an ID token
+// PingFederate does not reissue on refresh. upsertSeenGroups, in the same
+// statement, records the groups for the group picker, renewing each at most
+// once per renewInterval. One statement is one round trip.
+const (
+	upsertUserGroups = `INSERT INTO ` + userGroupsTable + ` AS t (user_key, groups, observed_at, updated_at)
+	VALUES (@key, @groups, @observedAt, @now)
+	ON CONFLICT (user_key) DO UPDATE
+	SET groups = EXCLUDED.groups, observed_at = EXCLUDED.observed_at, updated_at = EXCLUDED.updated_at
+	WHERE EXCLUDED.observed_at > t.observed_at
+	   OR (EXCLUDED.observed_at = t.observed_at AND t.updated_at <= @renewBefore)`
+	upsertSeenGroups = `INSERT INTO ` + seenGroupsTable + ` AS t (name, last_seen_at)
+	SELECT DISTINCT jsonb_array_elements_text(CAST(@groups AS jsonb)), CAST(@now AS timestamptz)
+	ON CONFLICT (name) DO UPDATE
+	SET last_seen_at = EXCLUDED.last_seen_at
+	WHERE t.last_seen_at <= @renewBefore`
+	recordUserAndSeenGroups = `WITH user_row AS (` + upsertUserGroups + `), seen AS (` + upsertSeenGroups + `) SELECT 1`
+)
 
-func (p *postgresGroupStore) setUserGroups(ctx context.Context, keys, groups []string, source string) error {
+func (p *postgresGroupStore) recordUserGroups(ctx context.Context, key string, groups []string, observedAt time.Time) error {
+	if groups == nil {
+		groups = []string{}
+	}
 	encoded, err := json.Marshal(groups)
 	if err != nil {
 		return err
 	}
 	now := p.now()
-	var rows []userGroupsRow
-	for _, key := range keys {
-		if p.due("user:"+key, source+"\x00"+string(encoded)) {
-			rows = append(rows, userGroupsRow{UserKey: key, Groups: string(encoded), UpdatedAt: now})
-		}
+	args := map[string]any{
+		"key":         key,
+		"groups":      string(encoded),
+		"observedAt":  truncateToPostgres(observedAt),
+		"now":         now,
+		"renewBefore": now.Add(-renewInterval),
 	}
-	if len(rows) == 0 {
-		return nil
+	statement := upsertUserGroups
+	if len(groups) > 0 {
+		statement = recordUserAndSeenGroups
 	}
-	if err := p.db.WithContext(ctx).Table(userGroupsTable).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "user_key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"groups", "updated_at"}),
-	}).Create(&rows).Error; err != nil {
+	if err := p.db.WithContext(ctx).Exec(statement, args).Error; err != nil {
 		return fmt.Errorf("record user groups: %w", err)
 	}
-	for _, row := range rows {
-		p.written.Add("user:"+row.UserKey, writtenRecord{value: source + "\x00" + row.Groups, at: now})
-	}
 	return nil
+}
+
+// truncateToPostgres drops what PostgreSQL's timestamps cannot hold, so that
+// the same observation compares equal to itself once stored.
+func truncateToPostgres(t time.Time) time.Time {
+	return t.Truncate(time.Microsecond)
 }
 
 func (p *postgresGroupStore) userGroups(ctx context.Context, key string) ([]string, bool, error) {
@@ -275,29 +293,6 @@ func (p *postgresGroupStore) userGroups(ctx context.Context, key string) ([]stri
 		groups = []string{}
 	}
 	return groups, true, nil
-}
-
-func (p *postgresGroupStore) addSeenGroups(ctx context.Context, groups []string) error {
-	now := p.now()
-	var rows []seenGroupRow
-	for _, name := range groups {
-		if p.due("seen:"+name, "") {
-			rows = append(rows, seenGroupRow{Name: name, LastSeenAt: now})
-		}
-	}
-	if len(rows) == 0 {
-		return nil
-	}
-	if err := p.db.WithContext(ctx).Table(seenGroupsTable).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "name"}},
-		DoUpdates: clause.AssignmentColumns([]string{"last_seen_at"}),
-	}).Create(&rows).Error; err != nil {
-		return fmt.Errorf("record seen groups: %w", err)
-	}
-	for _, row := range rows {
-		p.written.Add("seen:"+row.Name, writtenRecord{at: now})
-	}
-	return nil
 }
 
 func (p *postgresGroupStore) seenGroups(ctx context.Context) ([]string, error) {

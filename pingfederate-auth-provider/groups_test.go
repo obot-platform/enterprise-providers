@@ -217,51 +217,49 @@ func TestPostgresGroupStore(t *testing.T) {
 	a := openTestPostgresStore(t, dsn)
 	b := openTestPostgresStore(t, dsn) // a second replica
 	ctx := t.Context()
+	t0 := time.Now().Truncate(time.Second)
 
 	if _, ok, err := b.userGroups(ctx, "sub-1"); err != nil || ok {
 		t.Fatalf("unknown user: ok=%v err=%v", ok, err)
 	}
-	if err := a.setUserGroups(ctx, []string{"sub-1", "ada@example.com"}, []string{"admins", "devs"}, "t1"); err != nil {
+	if err := a.recordUserGroups(ctx, "sub-1", []string{"admins", "devs"}, t0); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"sub-1", "ada@example.com"} {
-		if groups, ok, err := b.userGroups(ctx, key); err != nil || !ok || len(groups) != 2 {
-			t.Errorf("userGroups(%s) on the other replica = %v %v %v", key, groups, ok, err)
-		}
+	if groups, ok, err := b.userGroups(ctx, "sub-1"); err != nil || !ok || len(groups) != 2 {
+		t.Errorf("userGroups on the other replica = %v %v %v", groups, ok, err)
+	}
+	if seen, err := b.seenGroups(ctx); err != nil || len(seen) != 2 {
+		t.Errorf("seen groups on the other replica = %v %v", seen, err)
 	}
 
-	// A change is written at once, even within the rewrite interval.
-	if err := a.setUserGroups(ctx, []string{"sub-1"}, []string{"devs"}, "t2"); err != nil {
+	// The scenario the write ordering exists for: replica A records X, replica
+	// B records a later observation Y, and replica A then sends X again from
+	// its older observation. The newer observation must stand.
+	if err := b.recordUserGroups(ctx, "sub-1", []string{"devs"}, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.recordUserGroups(ctx, "sub-1", []string{"admins", "devs"}, t0); err != nil {
 		t.Fatal(err)
 	}
 	if groups, _, _ := b.userGroups(ctx, "sub-1"); len(groups) != 1 || groups[0] != "devs" {
-		t.Errorf("changed groups = %v", groups)
+		t.Errorf("groups after an older observation arrived = %v, want the newer observation", groups)
 	}
-	// So is a change back to what this replica last wrote after another
-	// replica wrote something else: each observation comes with a new token.
-	if err := b.setUserGroups(ctx, []string{"sub-1"}, []string{"admins", "devs"}, "t3"); err != nil {
+
+	// A newer observation is written whichever replica sends it, including a
+	// change back to groups recorded before.
+	if err := a.recordUserGroups(ctx, "sub-1", []string{"admins", "devs"}, t0.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.setUserGroups(ctx, []string{"sub-1"}, []string{"devs"}, "t4"); err != nil {
-		t.Fatal(err)
-	}
-	if groups, _, _ := b.userGroups(ctx, "sub-1"); len(groups) != 1 || groups[0] != "devs" {
-		t.Errorf("groups after both replicas wrote = %v, want the latest write", groups)
+	if groups, _, _ := b.userGroups(ctx, "sub-1"); len(groups) != 2 {
+		t.Errorf("groups after a newer observation = %v", groups)
 	}
 
 	// No groups is a recorded answer, not a missing one.
-	if err := a.setUserGroups(ctx, []string{"loner"}, nil, "t5"); err != nil {
+	if err := a.recordUserGroups(ctx, "loner", nil, t0); err != nil {
 		t.Fatal(err)
 	}
 	if groups, ok, _ := b.userGroups(ctx, "loner"); !ok || groups == nil || len(groups) != 0 {
 		t.Errorf("user without groups = %#v %v, want an empty list", groups, ok)
-	}
-
-	if err := a.addSeenGroups(ctx, []string{"admins", "devs"}); err != nil {
-		t.Fatal(err)
-	}
-	if seen, err := b.seenGroups(ctx); err != nil || len(seen) != 2 {
-		t.Errorf("seen groups on the other replica = %v %v", seen, err)
 	}
 
 	// Records expire and are pruned.
@@ -283,13 +281,15 @@ func TestPostgresGroupStore(t *testing.T) {
 	}
 }
 
-// An unchanged record is renewed only once per rewrite interval, so that the
-// request path does not write on every request.
+// Repeating the same observation writes nothing, except a renewal once per
+// renewInterval that keeps an active user's record from expiring. The
+// database decides, not anything the replica remembers.
 func TestPostgresGroupStoreRenewsUnchangedRecords(t *testing.T) {
 	dsn := testPostgresDSN(t)
 	store := openTestPostgresStore(t, dsn)
 	ctx := t.Context()
 	start := time.Now().Truncate(time.Second)
+	observed := start.Add(-time.Minute)
 	store.now = func() time.Time { return start }
 
 	updatedAt := func() time.Time {
@@ -299,23 +299,36 @@ func TestPostgresGroupStoreRenewsUnchangedRecords(t *testing.T) {
 		}
 		return row.UpdatedAt
 	}
+	lastSeen := func() time.Time {
+		var row seenGroupRow
+		if err := store.db.Table(seenGroupsTable).Where("name = ?", "devs").Take(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+		return row.LastSeenAt
+	}
 
-	if err := store.setUserGroups(ctx, []string{"sub-1"}, []string{"devs"}, "t1"); err != nil {
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"devs"}, observed); err != nil {
 		t.Fatal(err)
 	}
-	store.now = func() time.Time { return start.Add(rewriteInterval / 2) }
-	if err := store.setUserGroups(ctx, []string{"sub-1"}, []string{"devs"}, "t1"); err != nil {
+	store.now = func() time.Time { return start.Add(renewInterval / 2) }
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"devs"}, observed); err != nil {
 		t.Fatal(err)
 	}
 	if got := updatedAt(); !got.Equal(start) {
-		t.Errorf("unchanged record rewritten early: updated_at = %v, want %v", got, start)
+		t.Errorf("repeated observation rewritten early: updated_at = %v, want %v", got, start)
 	}
-	store.now = func() time.Time { return start.Add(rewriteInterval) }
-	if err := store.setUserGroups(ctx, []string{"sub-1"}, []string{"devs"}, "t1"); err != nil {
+	if got := lastSeen(); !got.Equal(start) {
+		t.Errorf("seen group rewritten early: last_seen_at = %v, want %v", got, start)
+	}
+	store.now = func() time.Time { return start.Add(renewInterval) }
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"devs"}, observed); err != nil {
 		t.Fatal(err)
 	}
-	if got := updatedAt(); !got.Equal(start.Add(rewriteInterval)) {
-		t.Errorf("unchanged record not renewed: updated_at = %v", got)
+	if got := updatedAt(); !got.Equal(start.Add(renewInterval)) {
+		t.Errorf("repeated observation not renewed: updated_at = %v", got)
+	}
+	if got := lastSeen(); !got.Equal(start.Add(renewInterval)) {
+		t.Errorf("seen group not renewed: last_seen_at = %v", got)
 	}
 }
 
@@ -364,11 +377,8 @@ func TestPostgresGroupStoreDoesNotRecreateDroppedTables(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.setUserGroups(ctx, []string{"sub-1"}, []string{"devs"}, "t1"); err == nil {
-		t.Error("recording groups after the table was dropped should fail")
-	}
-	if err := store.addSeenGroups(ctx, []string{"devs"}); err == nil {
-		t.Error("recording seen groups after the table was dropped should fail")
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"devs"}, time.Now()); err == nil {
+		t.Error("recording groups after the tables were dropped should fail")
 	}
 	for _, table := range []string{userGroupsTable, seenGroupsTable} {
 		if store.db.Migrator().HasTable(table) {
@@ -572,5 +582,58 @@ func TestTokenGroupsTTL(t *testing.T) {
 	cfg.refreshDuration = 0
 	if got := tokenGroupsTTL(cfg); got != cacheTTL {
 		t.Errorf("ttl = %v, want %v without a refresh duration", got, cacheTTL)
+	}
+}
+
+// The in-memory store orders observations the same way as the PostgreSQL one.
+func TestMemoryGroupStoreIgnoresOlderObservations(t *testing.T) {
+	store := newMemoryGroupStore()
+	ctx := t.Context()
+	t0 := time.Now()
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"devs"}, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"admins", "devs"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	if groups, _, _ := store.userGroups(ctx, "sub-1"); len(groups) != 1 || groups[0] != "devs" {
+		t.Errorf("groups = %v, want the newer observation", groups)
+	}
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"admins", "devs"}, t0.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if groups, _, _ := store.userGroups(ctx, "sub-1"); len(groups) != 2 {
+		t.Errorf("groups = %v, want the newest observation", groups)
+	}
+}
+
+// Repeating an observation leaves the row untouched: PostgreSQL makes no new
+// row version, so there is no write, WAL, or vacuum work per request.
+func TestPostgresGroupStoreRepeatedObservationDoesNotWrite(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	store := openTestPostgresStore(t, dsn)
+	ctx := t.Context()
+	observed := time.Now().Add(-time.Minute)
+	rowVersion := func(table, where string, arg any) string {
+		var xmin string
+		if err := store.db.Raw("SELECT xmin::text FROM "+table+" WHERE "+where, arg).Scan(&xmin).Error; err != nil {
+			t.Fatal(err)
+		}
+		return xmin
+	}
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"devs"}, observed); err != nil {
+		t.Fatal(err)
+	}
+	userVersion, seenVersion := rowVersion(userGroupsTable, "user_key = ?", "sub-1"), rowVersion(seenGroupsTable, "name = ?", "devs")
+	for range 3 {
+		if err := store.recordUserGroups(ctx, "sub-1", []string{"devs"}, observed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rowVersion(userGroupsTable, "user_key = ?", "sub-1"); got != userVersion {
+		t.Errorf("user row rewritten by a repeated observation: xmin %s -> %s", userVersion, got)
+	}
+	if got := rowVersion(seenGroupsTable, "name = ?", "devs"); got != seenVersion {
+		t.Errorf("seen group rewritten by a repeated observation: xmin %s -> %s", seenVersion, got)
 	}
 }

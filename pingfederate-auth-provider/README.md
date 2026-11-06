@@ -115,9 +115,17 @@ in two tables declared in the manifest's `postgresTables`:
 The provider creates the tables when it starts, and only then: Obot drops them,
 with the session tables, when the provider is deconfigured or a staged switch
 to it is discarded, and a provider
-still running on another replica must not bring them back. It writes a user's
-record when it sees the user with a new access token, and renews it hourly,
-rather than on every request. Expired rows are deleted hourly.
+still running on another replica must not bring them back. Expired rows are
+deleted hourly.
+
+Each record carries when its groups were observed: when userinfo answered, or
+when the ID token they came from was issued. A write is a single conditional
+upsert, and PostgreSQL applies it only if its observation is newer than the
+recorded one, so a replica holding an older answer cannot overwrite a newer one,
+whatever order the writes arrive in. A request that brings nothing newer, which
+is most requests, leaves the row untouched; the same observation renews a row at
+most hourly, to keep an active user's record from expiring. Whether to write is
+decided by the database, not by anything a replica remembers.
 
 Without PostgreSQL, a single-replica installation, the provider keeps the same
 records in memory. A restart forgets them until each user's next request, and
