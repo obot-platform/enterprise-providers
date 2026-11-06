@@ -23,7 +23,10 @@ profile, and list their groups.
    - OpenID Connect policy: release `sub`, `email`, `name` (or `given_name`
      and `family_name`), `preferred_username`, and, for group-based access
      control in Obot, a group membership attribute (`groups` by default).
-     Groups can be released in the ID token, the userinfo response, or both.
+     Release groups in the userinfo response: the provider reads them only
+     from userinfo, so a user whose groups are released only in the ID token
+     is recorded with no groups. Releasing them in the ID token as well is
+     harmless.
      PingFederate releases only the claims mapped to a scope the client
      requests, so map the groups attribute to a scope (for example a
      `groups` scope) and add that scope to **Scopes** in Obot. A user without

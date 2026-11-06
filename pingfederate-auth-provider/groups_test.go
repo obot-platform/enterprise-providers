@@ -787,3 +787,40 @@ func TestPostgresConcurrentOverlappingWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestCookieFamily(t *testing.T) {
+	for name, want := range map[string]string{
+		"obot_access_token":    "obot_access_token",
+		"obot_access_token_0":  "obot_access_token",
+		"obot_access_token_12": "obot_access_token",
+		"obot_access_token_x":  "obot_access_token_x",
+		"_csrf":                "_csrf",
+		"name_":                "name_",
+	} {
+		if got := cookieFamily(name); got != want {
+			t.Errorf("cookieFamily(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// When the refreshed session cannot be loaded, nothing is recorded from it:
+// the refreshing request's own, pre-refresh state is not recorded either.
+func TestRefreshedSessionThatCannotBeLoadedRecordsNothing(t *testing.T) {
+	idp := startIDP(t, defaultIDPConfig(), false)
+	p := mustStartProvider(t, idp.Issuer(), nil)
+	p.mustLogin(t)
+
+	req := httptest.NewRequest(http.MethodGet, p.url+"/", nil)
+	u, _ := url.Parse(p.url)
+	for _, c := range p.jar.Cookies(u) {
+		req.AddCookie(c)
+	}
+	if _, ok := p.srv.refreshedState(req, []string{"obot_access_token=not-a-session; Path=/"}); ok {
+		t.Error("a refreshed cookie that is not a valid session should not load")
+	}
+	// The valid cookie the request carried is of the same family, and is
+	// dropped, so the old session is not loaded in its place.
+	if _, ok := p.srv.refreshedState(req, []string{"obot_access_token_0=not-a-session; Path=/"}); ok {
+		t.Error("the request's old session cookie should not be loaded in place of the refreshed one")
+	}
+}

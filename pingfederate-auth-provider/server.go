@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -319,22 +320,27 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 }
 
 // refreshedState loads the session a refresh just created, by replaying req
-// with the cookies the refresh set in place of the ones it carried.
+// with the cookies the refresh set in place of the ones it carried. It only
+// loads the session, and never refreshes it again: a second refresh would
+// rotate tokens whose cookies are thrown away here.
 func (s *server) refreshedState(req *http.Request, setCookies []string) (state.SerializableState, bool) {
 	header := http.Header{}
 	for _, c := range setCookies {
 		header.Add("Set-Cookie", c)
 	}
 	refreshedCookies := (&http.Response{Header: header}).Cookies()
+	// A session cookie may be split into name_0, name_1, ... when large, so
+	// drop every request cookie of a refreshed cookie's family: a leftover
+	// unsplit cookie would otherwise be preferred over the new split ones.
 	replaced := map[string]bool{}
 	for _, c := range refreshedCookies {
-		replaced[c.Name] = true
+		replaced[cookieFamily(c.Name)] = true
 	}
 
 	refreshedReq := req.Clone(req.Context())
 	refreshedReq.Header.Del("Cookie")
 	for _, c := range req.Cookies() {
-		if !replaced[c.Name] {
+		if !replaced[cookieFamily(c.Name)] {
 			refreshedReq.AddCookie(c)
 		}
 	}
@@ -344,12 +350,36 @@ func (s *server) refreshedState(req *http.Request, setCookies []string) (state.S
 		}
 	}
 
-	refreshed, err := state.GetSerializableState(s.proxy, refreshedReq)
-	if err != nil || len(refreshed.SetCookies) > 0 {
+	session, err := s.proxy.LoadCookiedSession(refreshedReq)
+	if err != nil || session == nil {
 		slog.Warn("could not load the refreshed session to record the user's groups", "error", err)
 		return state.SerializableState{}, false
 	}
-	return refreshed, true
+	if session.IsExpired() {
+		slog.Warn("the refreshed session has already expired; not recording the user's groups")
+		return state.SerializableState{}, false
+	}
+	return state.SerializableState{
+		ExpiresOn:         session.ExpiresOn,
+		AccessToken:       session.AccessToken,
+		IDToken:           session.IDToken,
+		PreferredUsername: session.PreferredUsername,
+		User:              session.User,
+		Email:             session.Email,
+		Groups:            session.Groups,
+		GroupInfos:        state.GroupInfoList{},
+	}, true
+}
+
+// cookieFamily returns a cookie's name without the _0, _1, ... suffix that
+// oauth2-proxy adds when it splits a large session cookie.
+func cookieFamily(name string) string {
+	if i := strings.LastIndexByte(name, '_'); i > 0 && i < len(name)-1 {
+		if _, err := strconv.Atoi(name[i+1:]); err == nil {
+			return name[:i]
+		}
+	}
+	return name
 }
 
 // recordSession fills in the group information for a session and records it
@@ -415,6 +445,12 @@ func (s *server) sessionGroups(ctx context.Context, token, subject string, idTok
 	current, ok := s.currentGroups(ctx, token, subject)
 	if !ok {
 		return tokenGroups, time.Time{}, false
+	}
+	if len(current.groups) == 0 && len(tokenGroups) > 0 {
+		// Groups released in the ID token but not in userinfo are not read,
+		// so this user is recorded with none. Make the likely
+		// misconfiguration visible.
+		slog.Warn("the ID token carries groups but userinfo does not; recording no groups. Release the groups attribute in userinfo", "claim", s.cfg.GroupsClaim)
 	}
 	return current.groups, current.observedAt, true
 }
