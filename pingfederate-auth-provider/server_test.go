@@ -25,14 +25,16 @@ func newTestServer(t *testing.T, userinfoURL string, cacheTTL time.Duration) *se
 		t.Fatal(err)
 	}
 	s := &server{
-		cfg:           cfg,
-		httpClient:    http.DefaultClient,
-		userinfoURL:   userinfoURL,
-		listenURL:     "http://127.0.0.1:9999",
-		groups:        expirable.NewLRU[string, []string](cacheSize, nil, cacheTTL+time.Hour),
-		idTokenClaims: expirable.NewLRU[string, map[string]any](cacheSize, nil, time.Hour),
-		directory:     newGroupDirectory(cfg.knownGroups),
+		cfg:               cfg,
+		httpClient:        http.DefaultClient,
+		userinfoURL:       userinfoURL,
+		listenURL:         "http://127.0.0.1:9999",
+		store:             newMemoryGroupStore(),
+		tokenGroups:       expirable.NewLRU[string, userinfoGroups](cacheSize, nil, time.Hour),
+		tokenGroupsFailed: expirable.NewLRU[string, struct{}](cacheSize, nil, tokenGroupsRetry),
+		idTokenClaims:     expirable.NewLRU[string, map[string]any](cacheSize, nil, time.Hour),
 	}
+	s.directory = newGroupDirectory(cfg.knownGroups, s.store)
 	if cacheTTL > 0 {
 		s.userinfo = expirable.NewLRU[string, map[string]any](cacheSize, nil, cacheTTL)
 	}
@@ -186,7 +188,7 @@ func TestGetUserInfoKeepsIDTokenGroupsWhenUserinfoHasNoGroupsClaim(t *testing.T)
 	var calls atomic.Int32
 	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com"})
 	s := newTestServer(t, upstream.URL, time.Minute)
-	s.rememberGroups([]string{"admins"}, "sub-1")
+	s.rememberGroups(t.Context(), "tok", []string{"admins"}, "sub-1")
 
 	if rec, _ := getUserInfo(t, s, "Bearer tok"); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -206,7 +208,7 @@ func TestListUserAuthGroups(t *testing.T) {
 		t.Errorf("unknown id: status = %d, want 500 so Obot keeps its cached memberships", rec.Code)
 	}
 
-	s.rememberGroups(nil, "loner")
+	s.rememberGroups(t.Context(), "tok", nil, "loner")
 	rec, groups := listGroups(t, s, "loner")
 	if rec.Code != http.StatusOK || groups == nil || len(groups) != 0 {
 		t.Errorf("known user without groups: status = %d, groups = %#v, want an empty list", rec.Code, groups)
@@ -215,7 +217,7 @@ func TestListUserAuthGroups(t *testing.T) {
 		t.Errorf("body = %q, want []", body)
 	}
 
-	s.rememberGroups([]string{" ops ", "", "sec"}, "trimmed")
+	s.rememberGroups(t.Context(), "tok", []string{" ops ", "", "sec"}, "trimmed")
 	if _, groups := listGroups(t, s, "trimmed\n"); len(groups) != 2 || groups[0].ID != "pingfederate/ops" || groups[1].Name != "sec" {
 		t.Errorf("groups = %+v", groups)
 	}
@@ -226,7 +228,7 @@ func TestRecordSession(t *testing.T) {
 	idToken := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"sub-9","email":"z@example.com","groups":["admins","devs"]}`)) + ".s"
 
 	ss := state.SerializableState{AccessToken: "tok", IDToken: idToken, User: "z@example.com", Email: "z@example.com"}
-	s.recordSession(&ss)
+	s.recordSession(t.Context(), &ss)
 	if len(ss.GroupInfos) != 2 || ss.GroupInfos[0].ID != "pingfederate/admins" || ss.GroupInfos[1].Name != "devs" {
 		t.Errorf("GroupInfos from ID token claims = %+v", ss.GroupInfos)
 	}
@@ -241,14 +243,14 @@ func TestRecordSession(t *testing.T) {
 
 	// Groups oauth2-proxy already extracted take precedence over the token.
 	ss = state.SerializableState{AccessToken: "tok2", IDToken: idToken, User: "z@example.com", Groups: []string{"from-session"}}
-	s.recordSession(&ss)
+	s.recordSession(t.Context(), &ss)
 	if len(ss.GroupInfos) != 1 || ss.GroupInfos[0].ID != "pingfederate/from-session" {
 		t.Errorf("GroupInfos = %+v, want the session groups", ss.GroupInfos)
 	}
 
 	// A session without an ID token (refreshed without one) still records groups.
 	ss = state.SerializableState{AccessToken: "tok3", User: "u", Groups: []string{"g"}}
-	s.recordSession(&ss)
+	s.recordSession(t.Context(), &ss)
 	if _, groups := listGroups(t, s, "u"); len(groups) != 1 {
 		t.Errorf("groups without ID token = %+v", groups)
 	}
@@ -258,7 +260,7 @@ func TestRecordSession(t *testing.T) {
 
 	// A garbage ID token is tolerated.
 	ss = state.SerializableState{AccessToken: "tok4", IDToken: "garbage", User: "v"}
-	s.recordSession(&ss)
+	s.recordSession(t.Context(), &ss)
 	if rec, groups := listGroups(t, s, "v"); rec.Code != http.StatusOK || len(groups) != 0 {
 		t.Errorf("garbage token: status = %d, groups = %+v", rec.Code, groups)
 	}
@@ -270,21 +272,21 @@ func TestRecordSessionSplitsDelimitedGroups(t *testing.T) {
 	idToken := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"sub-d","groups":"Domain Admins, devs"}`)) + ".s"
 
 	ss := state.SerializableState{AccessToken: "tok", IDToken: idToken, User: "d"}
-	s.recordSession(&ss)
+	s.recordSession(t.Context(), &ss)
 	if len(ss.GroupInfos) != 2 || ss.GroupInfos[0].Name != "Domain Admins" || ss.GroupInfos[1].Name != "devs" {
 		t.Errorf("GroupInfos from delimited claim = %+v", ss.GroupInfos)
 	}
 
 	// oauth2-proxy hands a delimited string claim over as a single group.
 	ss = state.SerializableState{AccessToken: "tok2", User: "d2", Groups: []string{"ops,sec"}}
-	s.recordSession(&ss)
+	s.recordSession(t.Context(), &ss)
 	if len(ss.GroupInfos) != 2 || ss.GroupInfos[0].ID != "pingfederate/ops" || ss.GroupInfos[1].ID != "pingfederate/sec" {
 		t.Errorf("GroupInfos from delimited session groups = %+v", ss.GroupInfos)
 	}
 
 	s.cfg.GroupsDelimiter = ""
 	ss = state.SerializableState{AccessToken: "tok3", User: "d3", Groups: []string{"CN=Admins,OU=Groups"}}
-	s.recordSession(&ss)
+	s.recordSession(t.Context(), &ss)
 	if len(ss.GroupInfos) != 1 || ss.GroupInfos[0].Name != "CN=Admins,OU=Groups" {
 		t.Errorf("GroupInfos without delimiter = %+v, want the value kept whole", ss.GroupInfos)
 	}

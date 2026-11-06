@@ -4,77 +4,39 @@ import (
 	"context"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
 
-const maxSeenGroups = 10000
-
 // groupDirectory stands in for the group directory PingFederate does not
-// expose. It holds the groups an administrator declared up front, so they can
-// be given roles in Obot before any member has signed in, plus every group
-// seen in a token since the provider started.
+// expose. It lists the groups an administrator declared up front, so they can
+// be given roles in Obot before any member has signed in, plus the groups the
+// store has seen in users' claims.
 type groupDirectory struct {
-	mu    sync.Mutex
-	names map[string]struct{}
-	// order remembers insertion order so that, when the directory is full,
-	// the oldest sign-in groups are dropped first. Declared groups are never
-	// dropped.
-	order    []string
-	declared map[string]struct{}
+	declared []string
+	store    groupStore
 }
 
-func newGroupDirectory(known []string) *groupDirectory {
-	d := &groupDirectory{names: map[string]struct{}{}, declared: map[string]struct{}{}}
-	for _, name := range known {
-		if name = strings.TrimSpace(name); name != "" {
-			d.names[name] = struct{}{}
-			d.declared[name] = struct{}{}
-		}
-	}
-	return d
-}
-
-// remember records groups seen in a user's claims.
-func (d *groupDirectory) remember(groups []string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, name := range groups {
-		if name = strings.TrimSpace(name); name == "" {
-			continue
-		}
-		if _, ok := d.names[name]; ok {
-			continue
-		}
-		d.names[name] = struct{}{}
-		d.order = append(d.order, name)
-		for len(d.order) > maxSeenGroups {
-			delete(d.names, d.order[0])
-			d.order = d.order[1:]
-		}
-	}
+func newGroupDirectory(known []string, store groupStore) *groupDirectory {
+	return &groupDirectory{declared: filterGroups(known), store: store}
 }
 
 // list returns one page of groups whose name contains filter, sorted by
 // name. The cursor is the last name of the previous page.
-func (d *groupDirectory) list(filter string, limit int, cursor string) (state.GroupInfoList, string) {
-	d.mu.Lock()
-	names := make([]string, 0, len(d.names))
-	for name := range d.names {
+func (d *groupDirectory) list(ctx context.Context, filter string, limit int, cursor string) (state.GroupInfoList, string, error) {
+	seen, err := d.store.seenGroups(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	all := filterGroups(append(append([]string{}, d.declared...), seen...))
+	names := make([]string, 0, len(all))
+	for _, name := range all {
 		if filter == "" || strings.Contains(strings.ToLower(name), strings.ToLower(filter)) {
 			names = append(names, name)
 		}
 	}
-	d.mu.Unlock()
-
-	sort.Slice(names, func(i, j int) bool {
-		if a, b := strings.ToLower(names[i]), strings.ToLower(names[j]); a != b {
-			return a < b
-		}
-		return names[i] < names[j]
-	})
+	sortGroupNames(names)
 
 	start := 0
 	if cursor != "" {
@@ -91,14 +53,17 @@ func (d *groupDirectory) list(filter string, limit int, cursor string) (state.Gr
 	if end < len(names) {
 		next = names[end-1]
 	}
-	return page, next
+	return page, next, nil
 }
 
 // fetchGroupPage returns one page of the directory for authcommon's
 // ListGroupsHandler, which serves Obot's group search behind the group picker.
 // The continuation token is the last name of the previous page.
-func (s *server) fetchGroupPage(_ context.Context, req authcommon.PageRequest) (authcommon.PageResult, error) {
-	items, next := s.directory.list(req.NameFilter, req.Limit, req.Cursor)
+func (s *server) fetchGroupPage(ctx context.Context, req authcommon.PageRequest) (authcommon.PageResult, error) {
+	items, next, err := s.directory.list(ctx, req.NameFilter, req.Limit, req.Cursor)
+	if err != nil {
+		return authcommon.PageResult{}, err
+	}
 	return authcommon.PageResult{Items: items, NextCursor: next}, nil
 }
 

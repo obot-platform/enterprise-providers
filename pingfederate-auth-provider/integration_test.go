@@ -379,10 +379,12 @@ func TestLoginFlowEndToEnd(t *testing.T) {
 			t.Errorf("profile[%s] = %v, want %q", key, profile[key], want)
 		}
 	}
-	if idp.Counts().Userinfo != before+1 {
-		t.Errorf("userinfo calls = %d, want %d", idp.Counts().Userinfo, before+1)
+	// The state lookup asked userinfo for the access token's current groups,
+	// so the profile is served from the cache it filled.
+	if before == 0 || idp.Counts().Userinfo != before {
+		t.Errorf("userinfo calls = %d, want %d: one by the state lookup, none by user info", idp.Counts().Userinfo, before)
 	}
-	if status, _ := p.userInfo(t, ss.AccessToken); status != http.StatusOK || idp.Counts().Userinfo != before+1 {
+	if status, _ := p.userInfo(t, ss.AccessToken); status != http.StatusOK || idp.Counts().Userinfo != before {
 		t.Errorf("second user info call was not served from cache (status %d, calls %d)", status, idp.Counts().Userinfo)
 	}
 

@@ -96,4 +96,10 @@ optionalConfigurationParameters:
     description: "${pingfederate_auth_provider_enable_logging_description}"
     sensitive: false
 postgresTablePrefix: "pingfederate_"
+# Tables the provider creates besides its session tables, named after the
+# prefix. Obot drops them, with the session tables, when the provider is
+# deconfigured.
+postgresTables:
+  - "user_groups"
+  - "seen_groups"
 groupIDPrefix: "pingfederate/"

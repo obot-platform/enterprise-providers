@@ -70,30 +70,49 @@ three provider-specific endpoints over the loopback interface:
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /obot-get-state` | Identifies the user behind a request from the session cookie, refreshing the upstream tokens when due. The response includes the user's groups. |
+| `POST /obot-get-state` | Identifies the user behind a request from the session cookie, refreshing the upstream tokens when due. The response includes the user's groups, read from userinfo once per access token (see [Groups](#groups)). |
 | `GET /obot-get-user-info` | Returns the profile for a bearer access token: the userinfo claims plus `id` (the subject), `name`, `email` and `picture`. Responses are cached per token for a few minutes because Obot asks often. If the userinfo endpoint is unavailable, the claims from the ID token are used. |
-| `POST /obot-list-user-auth-groups` | Returns the groups recorded for a provider user ID. The provider remembers groups from every state and userinfo lookup. An unknown ID is an error rather than an empty list, so that Obot keeps the memberships it already has. |
-| `GET /obot-list-auth-groups` | Backs the group picker in Obot's admin UI. PingFederate has no directory API, so the provider lists the groups declared in **Known Groups** plus every group seen in a token since it started. |
+| `POST /obot-list-user-auth-groups` | Returns the groups recorded for a provider user ID. The provider records groups from every state and userinfo lookup. An unknown ID is an error rather than an empty list, so that Obot keeps the memberships it already has. |
+| `GET /obot-list-auth-groups` | Backs the group picker in Obot's admin UI. PingFederate has no directory API, so the provider lists the groups declared in **Known Groups** plus every group recorded at sign-in in the last 90 days. |
 | `GET /obot-get-auth-groups` | Resolves group IDs to names; a group's name is its ID without the `pingfederate/` prefix. |
 
-## Limitations
+## Groups
 
 PingFederate has no API for listing groups or a user's memberships, so the
-provider learns groups only from tokens and userinfo responses, and keeps them
-in memory:
+provider learns groups from tokens and userinfo responses, and records them
+for the lookups Obot makes without a token.
 
-- After the provider restarts, it knows a user's groups again only once that
-  user's next request reaches it. Until then, Obot's background group
-  refresh for the user fails, and Obot keeps the memberships it already has;
-  it does not drop them.
-- With more than one Obot replica, each replica's provider knows only the
-  users who signed in through it.
-- The group picker lists **Known Groups** plus the groups seen since the
-  provider started. List every group you intend to map to a role under
-  **Known Groups**, so the picker offers it regardless of restarts.
-- Up to 10,000 users and 10,000 discovered groups are remembered; group
-  information for a user is forgotten after 24 hours without a request from
-  that user.
+**Keeping groups current.** A session's groups come from the ID token it was
+created with, and PingFederate does not issue a new ID token on refresh by
+default. So the provider asks userinfo for the user's groups once per access
+token, and each refresh brings a new token: a change to a user's groups in
+PingFederate reaches Obot within one **Token Refresh Duration**, without the
+user signing in again. When userinfo carries no groups claim (groups released
+only in the ID token), the session's groups are used.
+
+**Where groups are recorded.** Every Obot replica runs its own copy of the
+provider, so the records must be shared. When Obot uses PostgreSQL, which a
+multi-replica deployment requires, the provider keeps them in Obot's database,
+in two tables declared in the manifest's `postgresTables`:
+
+| Table | Holds |
+|---|---|
+| `pingfederate_user_groups` | Each user's groups, under every identifier Obot may look them up by. A record expires 24 hours after it was last written. |
+| `pingfederate_seen_groups` | Every group recorded at sign-in, for the group picker. A group expires 90 days after it was last seen. |
+
+The provider creates the tables when it starts, and only then: Obot drops them,
+with the session tables, when the provider is deconfigured, and a provider
+still running on another replica must not bring them back. It writes a user's
+record when it sees the user with a new access token, and renews it hourly,
+rather than on every request. Expired rows are deleted hourly.
+
+Without PostgreSQL, a single-replica installation, the provider keeps the same
+records in memory. A restart forgets them until each user's next request, and
+Obot keeps the memberships it already has in the meantime.
+
+**The group picker** lists **Known Groups** plus the groups recorded at
+sign-in. List every group you intend to map to a role under **Known Groups**,
+so the picker offers it before any member has signed in.
 
 ## Security checks
 

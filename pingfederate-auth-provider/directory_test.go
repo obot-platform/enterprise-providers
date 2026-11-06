@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,7 +31,7 @@ func listAuthGroups(t *testing.T, s *server, query string) (int, state.GroupInfo
 
 func TestDirectoryListsKnownAndSeenGroups(t *testing.T) {
 	s := newTestServer(t, "", time.Minute)
-	s.directory = newGroupDirectory([]string{"LDAP-Obot-Admins", " LDAP-Obot-Auditors ", ""})
+	s.directory = newGroupDirectory([]string{"LDAP-Obot-Admins", " LDAP-Obot-Auditors ", ""}, s.store)
 
 	status, items, next := listAuthGroups(t, s, "limit=50")
 	if status != http.StatusOK || next != "" {
@@ -40,7 +41,7 @@ func TestDirectoryListsKnownAndSeenGroups(t *testing.T) {
 		t.Errorf("declared groups = %q", got)
 	}
 
-	s.rememberGroups([]string{"devs", "LDAP-Obot-Admins"}, "sub-1")
+	s.rememberGroups(t.Context(), "tok", []string{"devs", "LDAP-Obot-Admins"}, "sub-1")
 	_, items, _ = listAuthGroups(t, s, "")
 	if got := groupNames(items); got != "pingfederate/devs=devs,pingfederate/LDAP-Obot-Admins=LDAP-Obot-Admins,pingfederate/LDAP-Obot-Auditors=LDAP-Obot-Auditors" {
 		t.Errorf("groups after sign-in = %q", got)
@@ -54,7 +55,7 @@ func TestDirectoryListsKnownAndSeenGroups(t *testing.T) {
 
 func TestDirectoryPaginates(t *testing.T) {
 	s := newTestServer(t, "", time.Minute)
-	s.directory = newGroupDirectory([]string{"b", "a", "D", "c", "e"})
+	s.directory = newGroupDirectory([]string{"b", "a", "D", "c", "e"}, s.store)
 
 	var all []string
 	cursor := ""
@@ -88,22 +89,26 @@ func TestDirectoryPaginates(t *testing.T) {
 }
 
 func TestDirectoryDropsOldestSeenGroupsButKeepsDeclared(t *testing.T) {
-	d := newGroupDirectory([]string{"declared"})
+	store := newMemoryGroupStore()
+	d := newGroupDirectory([]string{"declared"}, store)
 	for i := 0; i < maxSeenGroups+5; i++ {
-		d.remember([]string{"g" + strings.Repeat("x", i%7) + string(rune('a'+i%26)) + strings.Repeat("y", i/26)})
-	}
-	items, _ := d.list("", maxSeenGroups+1, "")
-	if len(d.names) > maxSeenGroups+1 {
-		t.Errorf("directory holds %d names, want at most %d", len(d.names), maxSeenGroups+1)
-	}
-	found := false
-	for _, item := range items {
-		if item.Name == "declared" {
-			found = true
+		if err := store.addSeenGroups(t.Context(), []string{fmt.Sprintf("g%05d", i)}); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !found {
-		t.Error("declared group was dropped")
+	seen, err := store.seenGroups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != maxSeenGroups || seen[0] != fmt.Sprintf("g%05d", maxSeenGroups+4) {
+		t.Errorf("store holds %d seen groups, newest %q; want %d, newest first", len(seen), seen[0], maxSeenGroups)
+	}
+	items, _, err := d.list(t.Context(), "", 1, "")
+	if err != nil || len(items) != 1 || items[0].Name != "declared" {
+		t.Errorf("declared group was dropped: %v %v", items, err)
+	}
+	if items, _, _ := d.list(t.Context(), "g00000", 10, ""); len(items) != 0 {
+		t.Errorf("oldest seen group should have been dropped, got %v", items)
 	}
 }
 

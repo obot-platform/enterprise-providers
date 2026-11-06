@@ -68,6 +68,9 @@ type Config struct {
 	EmailInIDToken bool
 	// AccessTokenLifetime defaults to one hour.
 	AccessTokenLifetime time.Duration
+	// OmitIDTokenOnRefresh leaves the ID token out of refresh responses,
+	// which is PingFederate's default.
+	OmitIDTokenOnRefresh bool
 }
 
 // AuthorizationRequest records what a client sent to the authorization
@@ -346,7 +349,7 @@ func (i *IDP) token(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "PKCE verification failed"})
 			return
 		}
-		i.issueTokensLocked(w, code.user, code.nonce)
+		i.issueTokensLocked(w, code.user, code.nonce, true)
 	case "refresh_token":
 		i.counts.Refresh++
 		user, ok := i.refreshTokens[r.PostForm.Get("refresh_token")]
@@ -355,14 +358,20 @@ func (i *IDP) token(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		delete(i.refreshTokens, r.PostForm.Get("refresh_token"))
-		i.issueTokensLocked(w, user, "")
+		// Like PingFederate, look the user up again rather than reissue what
+		// the original grant asserted, so that a change made with SetUser
+		// shows in the refreshed tokens.
+		if i.user.Subject == user.Subject {
+			user = i.user
+		}
+		i.issueTokensLocked(w, user, "", !i.cfg.OmitIDTokenOnRefresh)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported_grant_type"})
 	}
 }
 
 // issueTokensLocked writes a token response. The caller holds the lock.
-func (i *IDP) issueTokensLocked(w http.ResponseWriter, user User, nonce string) {
+func (i *IDP) issueTokensLocked(w http.ResponseWriter, user User, nonce string, withIDToken bool) {
 	now := time.Now()
 	accessToken := randomID(16)
 	refreshToken := randomID(16)
@@ -382,15 +391,18 @@ func (i *IDP) issueTokensLocked(w http.ResponseWriter, user User, nonce string) 
 	}
 	i.addProfileClaims(claims, user, i.cfg.EmailInIDToken, i.cfg.GroupsInIDToken)
 
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"access_token":  accessToken,
 		"token_type":    "Bearer",
 		"expires_in":    int(i.cfg.AccessTokenLifetime.Seconds()),
 		"refresh_token": refreshToken,
-		"id_token":      i.sign(claims),
 		"scope":         "openid email profile",
-	})
+	}
+	if withIDToken {
+		response["id_token"] = i.sign(claims)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (i *IDP) userinfo(w http.ResponseWriter, r *http.Request) {
