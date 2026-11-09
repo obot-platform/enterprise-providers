@@ -148,16 +148,16 @@ func (m *memoryGroupStore) seenGroups(context.Context) ([]string, error) {
 
 type userGroupsRow struct {
 	UserKey string `gorm:"primaryKey"`
-	Groups  string // a JSON array of group names
+	Groups  string `gorm:"not null"` // a JSON array of group names
 	// ObservedAt is when the groups were observed, which orders writes.
-	ObservedAt time.Time
+	ObservedAt time.Time `gorm:"not null"`
 	// UpdatedAt is when the row was last written, which expires it.
-	UpdatedAt time.Time `gorm:"index"`
+	UpdatedAt time.Time `gorm:"not null;index"`
 }
 
 type seenGroupRow struct {
 	Name       string    `gorm:"primaryKey"`
-	LastSeenAt time.Time `gorm:"index"`
+	LastSeenAt time.Time `gorm:"not null;index"`
 }
 
 // postgresGroupStore keeps the records in Obot's database, shared by every
@@ -240,13 +240,16 @@ const (
 
 	// upsertUserGroups writes a user's groups if the observation is newer
 	// than the recorded one, or if it is the same observation and the row is
-	// due for renewal, which keeps an active user's row from expiring.
+	// due for renewal, which keeps an active user's row from expiring, or if
+	// the row has expired: an expired row answers no lookups, so any
+	// observation is better than it, and must not wait for pruning.
 	upsertUserGroups = `INSERT INTO ` + userGroupsTable + ` AS t (user_key, groups, observed_at, updated_at)
 	VALUES (@key, @groups, @observedAt, @now)
 	ON CONFLICT (user_key) DO UPDATE
 	SET groups = EXCLUDED.groups, observed_at = EXCLUDED.observed_at, updated_at = EXCLUDED.updated_at
 	WHERE EXCLUDED.observed_at > COALESCE(t.observed_at, '-infinity')
-	   OR (EXCLUDED.observed_at = t.observed_at AND t.updated_at <= @renewBefore)`
+	   OR (EXCLUDED.observed_at = t.observed_at AND t.updated_at <= @renewBefore)
+	   OR t.updated_at <= @expiredBefore`
 
 	// upsertSeenGroups records groups for the group picker, renewing each at
 	// most once per renewInterval. Rows are written in name order, so that
@@ -271,11 +274,12 @@ func (p *postgresGroupStore) recordUserGroups(ctx context.Context, key string, g
 	now := p.now()
 	observedAt = truncateToPostgres(observedAt)
 	args := map[string]any{
-		"key":         key,
-		"groups":      string(encoded),
-		"observedAt":  observedAt,
-		"now":         now,
-		"renewBefore": now.Add(-renewInterval),
+		"key":           key,
+		"groups":        string(encoded),
+		"observedAt":    observedAt,
+		"now":           now,
+		"renewBefore":   now.Add(-renewInterval),
+		"expiredBefore": now.Add(-userGroupsTTL),
 	}
 	db := p.db.WithContext(ctx)
 
@@ -290,7 +294,8 @@ func (p *postgresGroupStore) recordUserGroups(ctx context.Context, key string, g
 
 	userDue := recorded.ObservedAt == nil || recorded.UpdatedAt == nil ||
 		observedAt.After(*recorded.ObservedAt) ||
-		(observedAt.Equal(*recorded.ObservedAt) && !recorded.UpdatedAt.After(now.Add(-renewInterval)))
+		(observedAt.Equal(*recorded.ObservedAt) && !recorded.UpdatedAt.After(now.Add(-renewInterval))) ||
+		!recorded.UpdatedAt.After(now.Add(-userGroupsTTL))
 	if userDue {
 		if err := db.Exec(upsertUserGroups, args).Error; err != nil {
 			return fmt.Errorf("record user groups: %w", err)
@@ -355,12 +360,19 @@ func (p *postgresGroupStore) seenGroups(ctx context.Context) ([]string, error) {
 	var names []string
 	if err := p.db.WithContext(ctx).Table(seenGroupsTable).
 		Where("last_seen_at > ?", p.now().Add(-seenGroupsTTL)).
-		Order("last_seen_at DESC").Limit(maxSeenGroups).
+		Order("last_seen_at DESC, name").Limit(maxSeenGroups).
 		Pluck("name", &names).Error; err != nil {
 		return nil, fmt.Errorf("list seen groups: %w", err)
 	}
 	return names, nil
 }
+
+// pruneSeenGroups deletes expired seen groups.
+const pruneSeenGroups = `DELETE FROM ` + seenGroupsTable + ` WHERE name IN (
+	SELECT name FROM ` + seenGroupsTable + `
+	WHERE last_seen_at <= @cutoff
+	ORDER BY name
+	FOR UPDATE SKIP LOCKED)`
 
 // prune deletes expired rows. Expired rows are already ignored, so this only
 // keeps the tables from growing.
@@ -370,8 +382,11 @@ func (p *postgresGroupStore) prune(ctx context.Context) error {
 		Where("updated_at <= ?", now.Add(-userGroupsTTL)).Delete(&userGroupsRow{}).Error; err != nil {
 		return fmt.Errorf("prune user groups: %w", err)
 	}
-	if err := p.db.WithContext(ctx).Table(seenGroupsTable).
-		Where("last_seen_at <= ?", now.Add(-seenGroupsTTL)).Delete(&seenGroupRow{}).Error; err != nil {
+	// Lock expired groups in name order, as recordUserGroups does, so the two
+	// cannot deadlock, and skip any a sign-in holds: it is renewing them.
+	if err := p.db.WithContext(ctx).Exec(pruneSeenGroups, map[string]any{
+		"cutoff": now.Add(-seenGroupsTTL),
+	}).Error; err != nil {
 		return fmt.Errorf("prune seen groups: %w", err)
 	}
 	return nil
@@ -393,12 +408,15 @@ func (p *postgresGroupStore) pruneEvery(ctx context.Context, interval time.Durat
 	}
 }
 
-// filterGroups returns the trimmed, non-empty, de-duplicated names in order.
+// filterGroups returns the trimmed, non-empty, de-duplicated names in order,
+// without names containing a NUL character, which PostgreSQL cannot store.
 func filterGroups(groups []string) []string {
 	out := make([]string, 0, len(groups))
 	seen := map[string]bool{}
 	for _, g := range groups {
-		if g = strings.TrimSpace(g); g != "" && !seen[g] {
+		// PostgreSQL text and jsonb cannot hold a NUL character, and one such
+		// name would make every write of the user's groups fail.
+		if g = strings.TrimSpace(g); g != "" && !seen[g] && !strings.ContainsRune(g, 0) {
 			seen[g] = true
 			out = append(out, g)
 		}

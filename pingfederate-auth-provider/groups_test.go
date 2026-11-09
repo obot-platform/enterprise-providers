@@ -828,3 +828,114 @@ func TestRefreshedSessionThatCannotBeLoadedRecordsNothing(t *testing.T) {
 		t.Error("the request's old session cookie should not be loaded in place of the refreshed one")
 	}
 }
+
+// A group name containing a NUL character cannot be stored by PostgreSQL, and
+// would make every write of the user's groups fail; it is dropped.
+func TestPostgresGroupNameWithNULIsDropped(t *testing.T) {
+	if got := filterGroups([]string{"ok", "bad\x00x", " ok "}); strings.Join(got, "|") != "ok" {
+		t.Errorf("filterGroups = %q", got)
+	}
+	dsn := testPostgresDSN(t)
+	store := openTestPostgresStore(t, dsn)
+	if err := store.recordUserGroups(t.Context(), "sub-1", filterGroups([]string{"ok", "bad\x00x"}), time.Now()); err != nil {
+		t.Fatalf("recording with a NUL group name dropped: %v", err)
+	}
+	if groups, ok, _ := store.userGroups(t.Context(), "sub-1"); !ok || strings.Join(groups, "|") != "ok" {
+		t.Errorf("groups = %v %v", groups, ok)
+	}
+}
+
+// Pruning locks expired groups in name order and skips any a sign-in holds,
+// so it cannot deadlock with recordUserGroups, which locks in name order too.
+func TestPostgresPruneSkipsLockedGroups(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	store := openTestPostgresStore(t, dsn)
+	ctx := t.Context()
+	long := time.Now().Add(-seenGroupsTTL - time.Hour)
+	store.now = func() time.Time { return long }
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"a", "b"}, long); err != nil {
+		t.Fatal(err)
+	}
+	store.now = time.Now
+
+	locker := openTestPostgresStore(t, dsn)
+	tx := locker.db.Begin()
+	t.Cleanup(func() { tx.Rollback() })
+	if err := tx.Exec("SELECT 1 FROM " + seenGroupsTable + " WHERE name = 'a' FOR UPDATE").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	timeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := store.prune(timeout); err != nil {
+		t.Fatalf("prune blocked on a locked group: %v", err)
+	}
+	var names []string
+	store.db.Table(seenGroupsTable).Order("name").Pluck("name", &names)
+	if strings.Join(names, ",") != "a" {
+		t.Errorf("seen groups after prune = %v, want only the locked one left", names)
+	}
+}
+
+// An expired row answers no lookups, so any observation replaces it, even one
+// older than the expired row's, rather than waiting for pruning.
+func TestPostgresExpiredRowIsReplaced(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	store := openTestPostgresStore(t, dsn)
+	ctx := t.Context()
+	start := time.Now().Truncate(time.Second)
+	store.now = func() time.Time { return start }
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"new"}, start); err != nil {
+		t.Fatal(err)
+	}
+	store.now = func() time.Time { return start.Add(userGroupsTTL + time.Minute) }
+	if _, ok, _ := store.userGroups(ctx, "sub-1"); ok {
+		t.Fatal("the row should have expired")
+	}
+	if err := store.recordUserGroups(ctx, "sub-1", []string{"older"}, start.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if groups, ok, _ := store.userGroups(ctx, "sub-1"); !ok || strings.Join(groups, "|") != "older" {
+		t.Errorf("groups = %v %v, want the expired row replaced", groups, ok)
+	}
+}
+
+// Groups seen at the same moment are listed in name order, so the cut at
+// maxSeenGroups is stable.
+func TestPostgresSeenGroupsOrderIsStable(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	store := openTestPostgresStore(t, dsn)
+	// Insert in reverse name order, all at the same moment, so that only the
+	// tie-breaker, not the order rows were written in, puts them in name order.
+	at := time.Now()
+	store.now = func() time.Time { return at }
+	for i, name := range []string{"c", "b", "a"} {
+		if err := store.recordUserGroups(t.Context(), fmt.Sprintf("sub-%d", i), []string{name}, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if seen, _ := store.seenGroups(t.Context()); strings.Join(seen, ",") != "a,b,c" {
+		t.Errorf("seen = %v, want name order for equal times", seen)
+	}
+}
+
+// The columns the queries compare are NOT NULL, so the read and the upsert
+// cannot disagree about a NULL.
+func TestPostgresColumnsAreNotNull(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	store := openTestPostgresStore(t, dsn)
+	for table, columns := range map[string][]string{
+		userGroupsTable: {"groups", "observed_at", "updated_at"},
+		seenGroupsTable: {"last_seen_at"},
+	} {
+		for _, column := range columns {
+			var nullable string
+			if err := store.db.Raw("SELECT is_nullable FROM information_schema.columns WHERE table_name = ? AND column_name = ?", table, column).Scan(&nullable).Error; err != nil {
+				t.Fatal(err)
+			}
+			if nullable != "NO" {
+				t.Errorf("%s.%s is_nullable = %q, want NO", table, column, nullable)
+			}
+		}
+	}
+}
