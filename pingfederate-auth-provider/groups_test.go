@@ -432,8 +432,8 @@ func TestUserinfoFailureKeepsRecordedGroups(t *testing.T) {
 		t.Errorf("recorded groups after the profile fallback = %q, want them kept", got)
 	}
 
-	// A user never recorded stays unrecorded, so Obot keeps what it has
-	// rather than taking the session's groups as current.
+	// A user never recorded stays unrecorded, rather than having the
+	// session's groups taken as current.
 	ss = state.SerializableState{AccessToken: "expired-2", IDToken: idTokenFor("sub-2", "admins")}
 	s.recordSession(t.Context(), &ss)
 	if rec, _ := listGroups(t, s, "sub-2"); rec.Code != http.StatusInternalServerError {

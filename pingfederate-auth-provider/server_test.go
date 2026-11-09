@@ -209,7 +209,7 @@ func TestListUserAuthGroups(t *testing.T) {
 		t.Errorf("empty id: status = %d, want 400", rec.Code)
 	}
 	if rec, _ := listGroups(t, s, "nobody"); rec.Code != http.StatusInternalServerError {
-		t.Errorf("unknown id: status = %d, want 500 so Obot keeps its cached memberships", rec.Code)
+		t.Errorf("unknown id: status = %d, want 500 so Obot does not replace its stored memberships with none", rec.Code)
 	}
 
 	s.rememberGroups(t.Context(), "loner", nil, time.Now())

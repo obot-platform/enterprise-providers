@@ -595,8 +595,11 @@ func (s *server) profile(claims map[string]any) map[string]any {
 
 // listUserAuthGroups returns the groups recorded for a provider user ID. The
 // request body is the bare ID. An unknown ID is reported as an error rather
-// than as "no groups": Obot would persist an empty answer and drop the user's
-// memberships, whereas an error keeps what it already has and retries later.
+// than as "no groups", which Obot would persist, dropping the user's
+// memberships. Obot leaves its stored memberships alone on an error, but fails
+// the request that refreshed them, and retries after a minute. In practice the
+// same request has just recorded the user's groups, so an unknown ID means
+// userinfo failed for a user without a current record.
 func (s *server) listUserAuthGroups(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
 	if err != nil {
@@ -628,8 +631,8 @@ func (s *server) listUserAuthGroups(w http.ResponseWriter, r *http.Request) {
 // rememberGroups records the group list, observed at observedAt, under the
 // user's subject: the identifier Obot looks a user's groups up by, and the
 // only one, since no user can choose another's. A failure is logged rather
-// than failing the request: Obot keeps the memberships it has when a later
-// lookup finds nothing.
+// than failing the request here; see listUserAuthGroups for what Obot does
+// when a later lookup finds nothing.
 func (s *server) rememberGroups(ctx context.Context, subject string, groups []string, observedAt time.Time) {
 	if subject == "" {
 		return

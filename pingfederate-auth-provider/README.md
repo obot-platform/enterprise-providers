@@ -77,7 +77,7 @@ three provider-specific endpoints over the loopback interface:
 |---|---|
 | `POST /obot-get-state` | Identifies the user behind a request from the session cookie, refreshing the upstream tokens when due. The response includes the user's groups, read from userinfo once per access token (see [Groups](#groups)). |
 | `GET /obot-get-user-info` | Returns the profile for a bearer access token: the userinfo claims plus `id` (the subject), `name`, `email` and `picture`. Responses are cached per token for a few minutes because Obot asks often. If the userinfo endpoint is unavailable, the claims from the ID token are used. |
-| `POST /obot-list-user-auth-groups` | Returns the groups recorded for a provider user ID. The provider records groups from every state and userinfo lookup. An unknown ID is an error rather than an empty list, so that Obot keeps the memberships it already has. |
+| `POST /obot-list-user-auth-groups` | Returns the groups recorded for a provider user ID. The provider records groups from every state and userinfo lookup. An unknown ID is an error rather than an empty list, which Obot would store, dropping the user's memberships. On an error Obot leaves its stored memberships alone, but fails the request that triggered the refresh with "Authentication provider configuration error", and retries a minute later (see "When Obot finds no record" under [Groups](#groups)). |
 | `GET /obot-list-auth-groups` | Backs the group picker in Obot's admin UI. PingFederate has no directory API, so the provider lists the groups declared in **Known Groups** plus every group recorded at sign-in in the last 90 days. |
 | `GET /obot-get-auth-groups` | Resolves group IDs to names; a group's name is its ID without the `pingfederate/` prefix. |
 
@@ -138,8 +138,23 @@ every request. Whether to write is decided by the database, not by anything a
 replica remembers.
 
 Without PostgreSQL, a single-replica installation, the provider keeps the same
-records in memory. A restart forgets them until each user's next request, and
-Obot keeps the memberships it already has in the meantime.
+records in memory. A restart forgets them, and each user's next request records
+them again.
+
+**When Obot finds no record.** Obot keeps its own copy of each user's group
+memberships, and asks the provider for an update at most every 10 minutes per
+user, only during browser requests. Each such request first asks the provider
+for the session, which records the user's current groups, so Obot's lookup in
+the same request normally finds them. It finds no record only when userinfo
+fails on that request and the user has no current record: they have never been
+recorded, their record expired (24 hours without a write), or the in-memory
+store was restarted. Obot then leaves the memberships it has stored as they
+are, but fails that request with a 500 "Authentication provider configuration
+error", and skips lookups for that user for a minute, during which their
+requests use the stored memberships. So a userinfo outage shows a user an
+error about once a minute rather than changing their groups. Requests made
+with Obot API keys never ask the provider: they use the stored memberships, as
+of the user's last browser session.
 
 **The group picker** lists **Known Groups** plus the groups recorded at
 sign-in. List every group you intend to map to a role under **Known Groups**,
