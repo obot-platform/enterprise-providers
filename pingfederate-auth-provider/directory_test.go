@@ -2,13 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
 
@@ -112,22 +115,161 @@ func TestDirectoryDropsOldestSeenGroupsButKeepsDeclared(t *testing.T) {
 	}
 }
 
-func TestGetAuthGroupsResolvesIDsInNamespace(t *testing.T) {
-	s := newTestServer(t, "", time.Minute)
-	req := httptest.NewRequest(http.MethodGet, "/obot-get-auth-groups?ids=pingfederate%2FLDAP-Obot-Admins,other%2Fx,pingfederate%2F,%20pingfederate%2Fdevs%20", nil)
+func getAuthGroups(t *testing.T, s *server, ids []string) (int, state.GroupInfoList) {
+	t.Helper()
+	// Built the way Obot's gateway client builds it
+	// (pkg/gateway/client/group.go): the IDs joined with commas, then
+	// query-encoded.
+	q := url.Values{}
+	q.Set("ids", strings.Join(ids, ","))
+	req := httptest.NewRequest(http.MethodGet, "/obot-get-auth-groups?"+q.Encode(), nil)
 	rec := httptest.NewRecorder()
 	s.handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
 	var page struct {
 		Items state.GroupInfoList `json:"items"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
-		t.Fatal(err)
+	if rec.Code == http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := groupNames(page.Items); got != "pingfederate/LDAP-Obot-Admins=LDAP-Obot-Admins,pingfederate/devs=devs" {
+	return rec.Code, page.Items
+}
+
+func TestGetAuthGroupsResolvesIDsInNamespace(t *testing.T) {
+	s := newTestServer(t, "", time.Minute)
+	code, items := getAuthGroups(t, s, []string{"pingfederate/LDAP-Obot-Admins", "pingfederate/", " pingfederate/devs ", "pingfederate/devs"})
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if got := groupNames(items); got != "pingfederate/LDAP-Obot-Admins=LDAP-Obot-Admins,pingfederate/devs=devs" {
 		t.Errorf("resolved = %q", got)
+	}
+	if code, _ := getAuthGroups(t, s, nil); code != http.StatusBadRequest {
+		t.Errorf("without ids: status = %d, want 400", code)
+	}
+}
+
+// Obot's gateway client joins the IDs with unescaped commas, and
+// PingFederate's groups are usually LDAP DNs, so every DN it sends whole must
+// come back whole, under the exact ID it asked for.
+func TestGetAuthGroupsKeepsDNsWhole(t *testing.T) {
+	s := newTestServer(t, "", time.Minute)
+	ids := []string{
+		"pingfederate/cn=group.0,ou=Groups,dc=example,dc=com",
+		"pingfederate/devs",
+		"pingfederate/cn=Smith\\, John,ou=People, dc=example,dc=com",
+		"pingfederate/cn=a/b,ou=Groups",
+	}
+	code, items := getAuthGroups(t, s, ids)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if len(items) != len(ids) {
+		t.Fatalf("resolved %d groups, want %d: %+v", len(items), len(ids), items)
+	}
+	for i, id := range ids {
+		if items[i].ID != id || items[i].Name != strings.TrimPrefix(id, groupIDPrefix) {
+			t.Errorf("group %d = %+v, want ID %q", i, items[i], id)
+		}
+	}
+}
+
+func TestParseGroupIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{
+			name: "plain names",
+			raw:  "pingfederate/a,pingfederate/b",
+			want: []string{"a", "b"},
+		},
+		{
+			name: "DNs",
+			raw:  "pingfederate/cn=a,ou=x,pingfederate/cn=b,ou=y",
+			want: []string{"cn=a,ou=x", "cn=b,ou=y"},
+		},
+		{
+			name: "pieces before the first ID are dropped",
+			raw:  "ou=x,dc=y,pingfederate/a",
+			want: []string{"a"},
+		},
+		{
+			name: "duplicates and empty names are dropped",
+			raw:  "pingfederate/a,pingfederate/,pingfederate/a",
+			want: []string{"a"},
+		},
+		{
+			name: "other providers' IDs are dropped, not joined onto a DN",
+			raw:  "pingfederate/cn=a,ou=x,entra/1234,pingfederate/b,okta/cn=c,ou=y",
+			want: []string{"cn=a,ou=x", "b"},
+		},
+		{
+			name: "blank pieces between IDs or at the end are skipped",
+			raw:  "pingfederate/a,,pingfederate/b, ,",
+			want: []string{"a", "b"},
+		},
+		{
+			name: "an empty DN component is kept",
+			raw:  "pingfederate/cn=a,,ou=x,pingfederate/b",
+			want: []string{"cn=a,,ou=x", "b"},
+		},
+		{
+			name: "a blank escaped component is kept",
+			raw:  `pingfederate/cn=a\, ,ou=x,pingfederate/b`,
+			want: []string{`cn=a\, ,ou=x`, "b"},
+		},
+		{
+			name: "a piece after an escaped comma continues the DN",
+			raw:  `pingfederate/cn=Smith\, Jr/Sr,ou=People,pingfederate/b`,
+			want: []string{`cn=Smith\, Jr/Sr,ou=People`, "b"},
+		},
+		{
+			name: "an escaped backslash does not escape the comma after it",
+			raw:  `pingfederate/cn=a\\,pingfederate/b`,
+			want: []string{`cn=a\\`, "b"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseGroupIDs(tc.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+				t.Errorf("parseGroupIDs(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// The limit counts IDs, not the commas inside them.
+func TestParseGroupIDsLimitCountsWholeIDs(t *testing.T) {
+	dns := make([]string, authcommon.MaxGroupIDsPerRequest)
+	for i := range dns {
+		dns[i] = fmt.Sprintf("pingfederate/cn=group.%d,ou=Groups,dc=example,dc=com", i)
+	}
+	if got, err := parseGroupIDs(strings.Join(dns, ",")); err != nil || len(got) != len(dns) {
+		t.Errorf("%d DNs: %d names, err = %v", len(dns), len(got), err)
+	}
+	dns = append(dns, "pingfederate/one-too-many")
+	if _, err := parseGroupIDs(strings.Join(dns, ",")); !errors.Is(err, authcommon.ErrTooManyIDs) {
+		t.Errorf("%d IDs: err = %v, want ErrTooManyIDs", len(dns), err)
+	}
+}
+
+// Parsing takes time in proportion to the input, however many of its commas
+// belong to one ID.
+func TestParseGroupIDsIsLinear(t *testing.T) {
+	raw := "pingfederate/cn=a" + strings.Repeat(",ou=x", 200_000)
+	start := time.Now()
+	names, err := parseGroupIDs(raw)
+	if err != nil || len(names) != 1 {
+		t.Fatalf("names = %d, err = %v", len(names), err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("parsing %d bytes took %v", len(raw), elapsed)
 	}
 }
 

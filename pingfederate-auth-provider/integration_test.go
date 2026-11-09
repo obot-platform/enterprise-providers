@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -16,10 +17,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/requests"
 	"github.com/obot-platform/enterprise-providers/pingfederate-auth-provider/internal/mockidp"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
@@ -758,5 +763,120 @@ func TestSignOut(t *testing.T) {
 	}
 	if _, resp := p.getState(t); resp.StatusCode == http.StatusOK {
 		t.Error("state still available after sign out")
+	}
+}
+
+// sessionCookieNames lists the session cookies the browser holds.
+func (p *testProvider) sessionCookieNames() []string {
+	u, _ := url.Parse(p.url)
+	var names []string
+	for _, c := range p.jar.Cookies(u) {
+		if cookieFamily(c.Name) == "obot_access_token" {
+			names = append(names, c.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// applySetCookies stores Set-Cookie headers as a browser would, deletions
+// included.
+func (p *testProvider) applySetCookies(setCookies []string) {
+	header := http.Header{}
+	for _, c := range setCookies {
+		header.Add("Set-Cookie", c)
+	}
+	u, _ := url.Parse(p.url)
+	p.jar.SetCookies(u, (&http.Response{Header: header}).Cookies())
+}
+
+// A refresh that changes how many cookies the session is split into must
+// delete the ones it no longer uses: a leftover unsplit cookie would be loaded
+// instead of the new chunks, and a leftover chunk would be joined onto them.
+func TestRefreshExpiresSupersededSessionCookies(t *testing.T) {
+	idp := startIDP(t, defaultIDPConfig(), false)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+	p.mustLogin(t)
+
+	manyGroups := func(n int) []string {
+		groups := make([]string, n)
+		for i := range groups {
+			// Random, because the session is compressed before it is split.
+			groups[i] = "cn=" + randomGroupName(t) + ",ou=Groups,dc=example,dc=com"
+		}
+		return groups
+	}
+	var previous []string
+	for _, step := range []struct {
+		name   string
+		groups []string
+	}{
+		{name: "unsplit to chunks", groups: manyGroups(120)},
+		{name: "fewer chunks", groups: manyGroups(50)},
+		{name: "chunks to unsplit", groups: []string{"devs"}},
+	} {
+		previous = p.sessionCookieNames()
+		user := adaUser
+		user.Groups = step.groups
+		idp.SetUser(user)
+		time.Sleep(2100 * time.Millisecond)
+
+		ss := p.mustGetState(t)
+		if len(ss.SetCookies) == 0 {
+			t.Fatalf("%s: expected a refresh", step.name)
+		}
+		p.applySetCookies(ss.SetCookies)
+		now := p.sessionCookieNames()
+		t.Logf("%s: session cookies %v -> %v", step.name, previous, now)
+		if strings.Join(now, ",") == strings.Join(previous, ",") {
+			t.Fatalf("%s: the refresh did not change the session's cookies (%v); adjust the group sizes", step.name, now)
+		}
+		if slices.Contains(now, "obot_access_token") && len(now) > 1 {
+			t.Errorf("%s: the browser holds an unsplit session cookie beside chunks: %v", step.name, now)
+		}
+
+		// The next request must load the refreshed session, with its groups.
+		ss = p.mustGetState(t)
+		if len(ss.SetCookies) != 0 {
+			t.Errorf("%s: the session was refreshed again, so the browser's cookies held an older session", step.name)
+		}
+		if len(ss.Groups) != len(step.groups) {
+			t.Errorf("%s: session groups = %d, want %d", step.name, len(ss.Groups), len(step.groups))
+		}
+	}
+}
+
+func randomGroupName(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// oauth2-proxy sends the client secret, codes, and refresh tokens through its
+// shared client, which must not follow a redirect: on the same host Go keeps
+// the Authorization header and resends the body even when the redirect drops
+// to plain HTTP.
+func TestOAuthProxyClientDoesNotFollowRedirects(t *testing.T) {
+	idp := startIDP(t, defaultIDPConfig(), false)
+	mustStartProvider(t, idp.Issuer(), nil)
+
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { targetCalls.Add(1) }))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/token", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	resp, err := requests.DefaultHTTPClient.Post(redirector.URL+"/token", "application/x-www-form-urlencoded", strings.NewReader("client_secret=s&refresh_token=rt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect || targetCalls.Load() != 0 {
+		t.Errorf("status = %d, redirect target called %d times; want the 307 returned and the target never called", resp.StatusCode, targetCalls.Load())
 	}
 }

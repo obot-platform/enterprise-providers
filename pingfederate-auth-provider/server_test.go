@@ -178,6 +178,53 @@ func TestGetUserInfoFallsBackToIDTokenClaims(t *testing.T) {
 	}
 }
 
+// Obot looks a user's groups up by the profile's id, so a userinfo answer
+// that is not for the session's subject must not become a profile.
+func TestGetUserInfoRejectsUserinfoForAnotherSubject(t *testing.T) {
+	var calls atomic.Int32
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "someone-else", "email": "eve@example.com", "groups": []string{"admins"}})
+	s := newTestServer(t, upstream.URL, time.Minute)
+	s.idTokenClaims.Add("tok", map[string]any{"sub": "sub-1", "email": "ada@example.com"})
+
+	if rec, profile := getUserInfo(t, s, "Bearer tok"); rec.Code != http.StatusBadGateway || profile != nil {
+		t.Errorf("status = %d, profile = %v, want 502 and no profile", rec.Code, profile)
+	}
+	for _, id := range []string{"sub-1", "someone-else"} {
+		if rec, _ := listGroups(t, s, id); rec.Code != http.StatusInternalServerError {
+			t.Errorf("groups(%s): status = %d, want nothing recorded", id, rec.Code)
+		}
+	}
+}
+
+func TestGetUserInfoRejectsUserinfoWithoutSubject(t *testing.T) {
+	var calls atomic.Int32
+	upstream := userinfoServer(t, &calls, map[string]any{"email": "ada@example.com", "groups": []string{"admins"}})
+	s := newTestServer(t, upstream.URL, time.Minute)
+
+	if rec, profile := getUserInfo(t, s, "Bearer tok"); rec.Code != http.StatusBadGateway || profile != nil {
+		t.Errorf("without ID token claims: status = %d, profile = %v, want 502 and no profile", rec.Code, profile)
+	}
+	s.idTokenClaims.Add("tok", map[string]any{"sub": "sub-1"})
+	if rec, profile := getUserInfo(t, s, "Bearer tok"); rec.Code != http.StatusBadGateway || profile != nil {
+		t.Errorf("with ID token claims: status = %d, profile = %v, want 502 and no profile", rec.Code, profile)
+	}
+}
+
+// A replica that has not seen the session cannot compare subjects, and
+// accepts userinfo's answer for the holder of the access token.
+func TestGetUserInfoWithoutIDTokenClaimsUsesUserinfoSubject(t *testing.T) {
+	var calls atomic.Int32
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "groups": []string{"admins"}})
+	s := newTestServer(t, upstream.URL, time.Minute)
+
+	if rec, profile := getUserInfo(t, s, "Bearer tok"); rec.Code != http.StatusOK || profile["id"] != "sub-1" {
+		t.Fatalf("status = %d, profile = %v", rec.Code, profile)
+	}
+	if rec, groups := listGroups(t, s, "sub-1"); rec.Code != http.StatusOK || len(groups) != 1 {
+		t.Errorf("groups(sub-1): status = %d, groups = %+v", rec.Code, groups)
+	}
+}
+
 func TestGetUserInfoRequiresToken(t *testing.T) {
 	s := newTestServer(t, "http://127.0.0.1:1", time.Minute)
 	if rec, _ := getUserInfo(t, s, ""); rec.Code != http.StatusBadRequest {

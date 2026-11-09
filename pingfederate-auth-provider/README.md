@@ -76,10 +76,10 @@ three provider-specific endpoints over the loopback interface:
 | Endpoint | Purpose |
 |---|---|
 | `POST /obot-get-state` | Identifies the user behind a request from the session cookie, refreshing the upstream tokens when due. The response includes the user's groups, read from userinfo once per access token (see [Groups](#groups)). |
-| `GET /obot-get-user-info` | Returns the profile for a bearer access token: the userinfo claims plus `id` (the subject), `name`, `email` and `picture`. Responses are cached per token for a few minutes because Obot asks often. If the userinfo endpoint is unavailable, the claims from the ID token are used. |
+| `GET /obot-get-user-info` | Returns the profile for a bearer access token: the userinfo claims plus `id` (the subject), `name`, `email` and `picture`. Responses are cached per token for a few minutes because Obot asks often. If the userinfo endpoint is unavailable, the claims from the ID token are used. A userinfo answer without a subject, or for a different subject than the session's ID token, is an error. |
 | `POST /obot-list-user-auth-groups` | Returns the groups recorded for a provider user ID. The provider records groups from every state and userinfo lookup. An unknown ID is an error rather than an empty list, which Obot would store, dropping the user's memberships. On an error Obot leaves its stored memberships alone, but fails the request that triggered the refresh with "Authentication provider configuration error", and retries a minute later (see "When Obot finds no record" under [Groups](#groups)). |
 | `GET /obot-list-auth-groups` | Backs the group picker in Obot's admin UI. PingFederate has no directory API, so the provider lists the groups declared in **Known Groups** plus every group recorded at sign-in in the last 90 days. |
-| `GET /obot-get-auth-groups` | Resolves group IDs to names; a group's name is its ID without the `pingfederate/` prefix. |
+| `GET /obot-get-auth-groups` | Resolves group IDs to names; a group's name is its ID without the `pingfederate/` prefix. Obot joins the IDs with commas, so a piece that does not start with a provider prefix such as `pingfederate/` is read as the rest of the ID before it, which keeps an LDAP DN whole when Obot sends it whole. Other providers' IDs are ignored. |
 
 ## Groups
 

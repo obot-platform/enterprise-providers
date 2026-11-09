@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -213,5 +214,39 @@ func TestTimeClaim(t *testing.T) {
 	}
 	if got := TimeClaim(map[string]any{}, "iat"); !got.IsZero() {
 		t.Errorf("missing iat = %v, want zero", got)
+	}
+}
+
+// A redirect is never followed: on the same host Go would keep the
+// Authorization header even when the redirect drops to plain HTTP.
+func TestHTTPClientDoesNotFollowRedirects(t *testing.T) {
+	var plainCalls atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		plainCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"sub": "u1", "issuer": "x"})
+	}))
+	defer plain.Close()
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer secure.Close()
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secure.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewHTTPClient([]string{caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Userinfo(context.Background(), client, secure.URL+"/userinfo", "good"); err == nil || !strings.Contains(err.Error(), "302") || !strings.Contains(err.Error(), "not followed") {
+		t.Errorf("userinfo through a redirect: err = %v, want a 302 error naming the redirect", err)
+	}
+	if _, err := Discover(context.Background(), client, secure.URL); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Errorf("discovery through a redirect: err = %v, want a 302 error", err)
+	}
+	if n := plainCalls.Load(); n != 0 {
+		t.Errorf("the redirect target was called %d times, want 0", n)
 	}
 }

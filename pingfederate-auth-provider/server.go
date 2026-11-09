@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	oauth2proxy "github.com/oauth2-proxy/oauth2-proxy/v7"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/requests"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/validation"
 	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/enterprise-providers/pingfederate-auth-provider/pkg/oidc"
@@ -184,6 +185,15 @@ func newOAuthProxyWithRetry(cfg *settings) (*oauth2proxy.OAuthProxy, error) {
 // store) mirrors the other Obot auth providers so the gateway treats this one
 // the same way.
 func newOAuthProxy(cfg *settings) (*oauth2proxy.OAuthProxy, error) {
+	// oauth2-proxy sends the client secret, authorization codes, and refresh
+	// tokens through this shared client, which follows redirects. Go keeps the
+	// Authorization header and resends the body on a same-host redirect, even
+	// from HTTPS to plain HTTP, so a redirect is reported as an error instead.
+	// PingFederate redirects none of these endpoints.
+	requests.DefaultHTTPClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
 	legacyOpts := options.NewLegacyOptions()
 	provider := &legacyOpts.LegacyProvider
 	provider.ProviderType = "oidc"
@@ -258,7 +268,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/obot-get-user-info", s.getUserInfo)
 	mux.HandleFunc("/obot-list-user-auth-groups", s.listUserAuthGroups)
 	mux.HandleFunc("/obot-list-auth-groups", authcommon.ListGroupsHandler(providerKind, s.fetchGroupPage))
-	mux.HandleFunc("/obot-get-auth-groups", authcommon.GetGroupsHandler(providerKind, s.fetchGroupsByIDs))
+	mux.HandleFunc("/obot-get-auth-groups", s.getAuthGroups)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/obot-") {
 			// An Obot-internal endpoint this provider does not know must not
@@ -311,6 +321,7 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 			s.recordSession(r.Context(), &refreshed)
 			ss.GroupInfos = refreshed.GroupInfos
 		}
+		ss.SetCookies = append(ss.SetCookies, expireSupersededCookies(req, ss.SetCookies)...)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -369,6 +380,47 @@ func (s *server) refreshedState(req *http.Request, setCookies []string) (state.S
 		Groups:            session.Groups,
 		GroupInfos:        state.GroupInfoList{},
 	}, true
+}
+
+// expireSupersededCookies returns Set-Cookie headers that delete the cookies
+// of the request that a refresh replaced without setting again. oauth2-proxy
+// splits a large session cookie into name_0, name_1, ... and sets only the
+// names the new session needs. A leftover unsplit cookie would be loaded in
+// preference to the new chunks, and a leftover chunk would be joined onto
+// them, so either would make the next request load an old or corrupt session.
+func expireSupersededCookies(req *http.Request, setCookies []string) []string {
+	header := http.Header{}
+	for _, c := range setCookies {
+		header.Add("Set-Cookie", c)
+	}
+	set := map[string]bool{}
+	// The attributes the browser matches a deletion on (path, domain) come
+	// from a cookie the refresh set.
+	templates := map[string]*http.Cookie{}
+	for _, c := range (&http.Response{Header: header}).Cookies() {
+		set[c.Name] = true
+		family := cookieFamily(c.Name)
+		if templates[family] == nil && c.MaxAge >= 0 && c.Value != "" {
+			templates[family] = c
+		}
+	}
+
+	var expired []string
+	seen := map[string]bool{}
+	for _, c := range req.Cookies() {
+		template := templates[cookieFamily(c.Name)]
+		if template == nil || set[c.Name] || seen[c.Name] {
+			continue
+		}
+		seen[c.Name] = true
+		deletion := *template
+		deletion.Name = c.Name
+		deletion.Value = ""
+		deletion.MaxAge = -1
+		deletion.Expires = time.Unix(1, 0)
+		expired = append(expired, deletion.String())
+	}
+	return expired
 }
 
 // cookieFamily returns a cookie's name without the _0, _1, ... suffix that
@@ -514,15 +566,34 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 		claims = cached
 	}
 
+	// Obot looks the user's groups up by the profile's id, so a userinfo
+	// answer is used only for the session's subject, as OpenID Connect
+	// requires. The session's ID token is unknown here only on a replica that
+	// has not seen the session; userinfo then answers for whoever holds the
+	// access token, which is as much as this request can check.
+	subject := oidc.StringClaim(claims, "sub")
+	idClaims, idClaimsKnown := s.idTokenClaims.Get(token)
+	if fromUserinfo {
+		if subject == "" {
+			slog.Warn("userinfo answered without a subject; not reporting a profile")
+			http.Error(w, "the userinfo response has no subject", http.StatusBadGateway)
+			return
+		}
+		if idClaimsKnown && oidc.StringClaim(idClaims, "sub") != subject {
+			slog.Warn("userinfo answered for a different subject than the session's ID token; not reporting a profile")
+			http.Error(w, "the userinfo response is for a different subject than the session", http.StatusBadGateway)
+			return
+		}
+	}
+
 	// PingFederate can release a display-name attribute only in the ID token.
 	// Fill missing name fields from the already-verified session token, while
 	// preserving the userinfo email and every identity/group lookup field.
 	profileClaims := maps.Clone(claims)
-	subject := oidc.StringClaim(claims, "sub")
-	if cached, ok := s.idTokenClaims.Get(token); ok && subject != "" && oidc.StringClaim(cached, "sub") == subject {
+	if idClaimsKnown && subject != "" && oidc.StringClaim(idClaims, "sub") == subject {
 		for _, name := range []string{s.cfg.NameClaim, "name", "given_name", "family_name", "preferred_username"} {
 			if strings.TrimSpace(oidc.StringClaim(profileClaims, name)) == "" {
-				if value := oidc.StringClaim(cached, name); value != "" {
+				if value := oidc.StringClaim(idClaims, name); value != "" {
 					profileClaims[name] = value
 				}
 			}
@@ -532,11 +603,9 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 	// Record groups only from a live userinfo answer: the cached ID token
 	// claims are the session's, and may hold groups the user has since lost.
 	// An answer without the groups claim means the user has no groups.
-	if fromUserinfo && subject != "" {
-		if cached, known := s.idTokenClaims.Get(token); !known || oidc.StringClaim(cached, "sub") == subject {
-			groups := oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
-			s.rememberGroups(r.Context(), subject, groups, answeredAt)
-		}
+	if fromUserinfo {
+		groups := oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
+		s.rememberGroups(r.Context(), subject, groups, answeredAt)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

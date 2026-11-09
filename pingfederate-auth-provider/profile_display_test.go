@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,8 +50,8 @@ func TestNameClaimFromVerifiedSessionToken(t *testing.T) {
 		t.Fatalf("profile = %v", p)
 	}
 	s.idTokenClaims.Add("tok", map[string]any{"sub": "different-subject", "display_name": "Wrong Person"})
-	_, p = getUserInfo(t, s, "Bearer tok")
-	if p["name"] == "Wrong Person" {
-		t.Fatal("accepted name from a different subject")
+	rec, p := getUserInfo(t, s, "Bearer tok")
+	if rec.Code != http.StatusBadGateway || p != nil {
+		t.Fatalf("userinfo for another subject: status = %d, profile = %v, want 502 and no profile", rec.Code, p)
 	}
 }

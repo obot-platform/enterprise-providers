@@ -37,6 +37,11 @@ type Discovery struct {
 // deriving one from http.DefaultTransport, because oauth2-proxy installs its
 // configured CAs into the default transport process-wide and this client's
 // trust must not depend on that.
+//
+// The client does not follow redirects. Go keeps the Authorization header on
+// a redirect to the same host, even from HTTPS to plain HTTP, so following
+// one could send an access token in cleartext; and PingFederate redirects
+// neither discovery nor userinfo.
 func NewHTTPClient(caFiles []string) (*http.Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if len(caFiles) > 0 {
@@ -65,7 +70,13 @@ func NewHTTPClient(caFiles []string) (*http.Client, error) {
 		ExpectContinueTimeout: time.Second,
 		TLSClientConfig:       tlsConfig,
 	}
-	return &http.Client{Transport: transport, Timeout: 30 * time.Second}, nil
+	return &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}, nil
 }
 
 // Discover fetches <issuer>/.well-known/openid-configuration.
@@ -82,7 +93,7 @@ func Discover(ctx context.Context, client *http.Client, issuer string) (*Discove
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("fetch %s: unexpected status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("fetch %s: unexpected status %d%s: %s", url, resp.StatusCode, redirectTarget(resp), strings.TrimSpace(string(body)))
 	}
 	var d Discovery
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&d); err != nil {
@@ -117,13 +128,23 @@ func Userinfo(ctx context.Context, client *http.Client, userinfoURL, authorizati
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("userinfo returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("userinfo returned %d%s: %s", resp.StatusCode, redirectTarget(resp), strings.TrimSpace(string(body)))
 	}
 	var claims map[string]any
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&claims); err != nil {
 		return nil, fmt.Errorf("decode userinfo: %w", err)
 	}
 	return claims, nil
+}
+
+// redirectTarget describes where a redirect response points, for an error
+// message, since the client does not follow redirects. It is empty for any
+// other response.
+func redirectTarget(resp *http.Response) string {
+	if location := resp.Header.Get("Location"); location != "" && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return fmt.Sprintf(" (a redirect to %s, which is not followed)", location)
+	}
+	return ""
 }
 
 // UnverifiedClaims decodes the payload of a JWT without checking its

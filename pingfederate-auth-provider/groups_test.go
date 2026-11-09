@@ -807,6 +807,35 @@ func TestCookieFamily(t *testing.T) {
 	}
 }
 
+func TestExpireSupersededCookies(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	for _, name := range []string{"obot_access_token", "obot_access_token_1", "_csrf", "other_1"} {
+		req.AddCookie(&http.Cookie{Name: name, Value: "old"})
+	}
+	fresh := (&http.Cookie{Name: "obot_access_token_0", Value: "new", Path: "/", Domain: "obot.example.com", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}).String()
+
+	expired := expireSupersededCookies(req, []string{fresh})
+	header := http.Header{"Set-Cookie": expired}
+	var names []string
+	for _, c := range (&http.Response{Header: header}).Cookies() {
+		names = append(names, c.Name)
+		if c.MaxAge >= 0 || c.Value != "" || c.Path != "/" || c.Domain != "obot.example.com" || !c.Secure || !c.HttpOnly {
+			t.Errorf("deletion of %s = %+v, want an expired cookie with the fresh cookie's attributes", c.Name, c)
+		}
+	}
+	// Only the session's own family is touched, and never a name the refresh set.
+	if strings.Join(names, ",") != "obot_access_token,obot_access_token_1" {
+		t.Errorf("expired %v, want the unsplit cookie and the stale chunk", names)
+	}
+
+	// A refresh that cleared the session deletes its own cookies; there is
+	// nothing to copy attributes from, and nothing more to do.
+	cleared := (&http.Cookie{Name: "obot_access_token", Path: "/", MaxAge: -1}).String()
+	if got := expireSupersededCookies(req, []string{cleared}); len(got) != 0 {
+		t.Errorf("after a clearing refresh: %v, want nothing", got)
+	}
+}
+
 // When the refreshed session cannot be loaded, nothing is recorded from it:
 // the refreshing request's own, pre-refresh state is not recorded either.
 func TestRefreshedSessionThatCannotBeLoadedRecordsNothing(t *testing.T) {
