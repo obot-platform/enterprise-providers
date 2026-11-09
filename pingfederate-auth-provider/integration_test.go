@@ -864,7 +864,14 @@ func TestOAuthProxyClientDoesNotFollowRedirects(t *testing.T) {
 	mustStartProvider(t, idp.Issuer(), nil)
 
 	var targetCalls atomic.Int32
-	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { targetCalls.Add(1) }))
+	target := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// Only the code under test sends GET or POST; a HEAD is a probe from
+		// the environment, such as a sandbox discovering the listening port.
+		if r.Method == http.MethodHead {
+			return
+		}
+		targetCalls.Add(1)
+	}))
 	defer target.Close()
 	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target.URL+"/token", http.StatusTemporaryRedirect)

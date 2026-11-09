@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -115,13 +116,17 @@ func TestDirectoryDropsOldestSeenGroupsButKeepsDeclared(t *testing.T) {
 	}
 }
 
+// getAuthGroups asks the way an Obot that predates the id parameter does: the
+// IDs joined with commas in ids.
 func getAuthGroups(t *testing.T, s *server, ids []string) (int, state.GroupInfoList) {
 	t.Helper()
-	// Built the way Obot's gateway client builds it
-	// (pkg/gateway/client/group.go): the IDs joined with commas, then
-	// query-encoded.
 	q := url.Values{}
 	q.Set("ids", strings.Join(ids, ","))
+	return getAuthGroupsQuery(t, s, q)
+}
+
+func getAuthGroupsQuery(t *testing.T, s *server, q url.Values) (int, state.GroupInfoList) {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/obot-get-auth-groups?"+q.Encode(), nil)
 	rec := httptest.NewRecorder()
 	s.handler().ServeHTTP(rec, req)
@@ -150,9 +155,9 @@ func TestGetAuthGroupsResolvesIDsInNamespace(t *testing.T) {
 	}
 }
 
-// Obot's gateway client joins the IDs with unescaped commas, and
-// PingFederate's groups are usually LDAP DNs, so every DN it sends whole must
-// come back whole, under the exact ID it asked for.
+// An older Obot joins the IDs with unescaped commas, and PingFederate's groups
+// are usually LDAP DNs, so every DN it sends whole must come back whole, under
+// the exact ID it asked for.
 func TestGetAuthGroupsKeepsDNsWhole(t *testing.T) {
 	s := newTestServer(t, "", time.Minute)
 	ids := []string{
@@ -172,6 +177,44 @@ func TestGetAuthGroupsKeepsDNsWhole(t *testing.T) {
 		if items[i].ID != id || items[i].Name != strings.TrimPrefix(id, groupIDPrefix) {
 			t.Errorf("group %d = %+v, want ID %q", i, items[i], id)
 		}
+	}
+}
+
+// Obot sends each ID whole in a repeated id parameter, alongside the same IDs
+// joined in ids (pkg/gateway/client/group.go). The id parameters are what
+// count, so DNs come back exactly as asked for even where the comma-joined
+// list could not be split back into them.
+func TestGetAuthGroupsReadsRepeatedID(t *testing.T) {
+	s := newTestServer(t, "", time.Minute)
+	ids := []string{
+		"pingfederate/cn=Admins,ou=Groups,dc=example,dc=com",
+		// Ends like the DN above, which a comma-joined list deduplicated by
+		// pieces would lose.
+		"pingfederate/cn=Devs,ou=Groups,dc=example,dc=com",
+		"pingfederate/Sales, EMEA/North",
+	}
+	q := url.Values{"id": append(slices.Clone(ids), "entra/1234", "pingfederate/", ids[0])}
+	q.Set("ids", "pingfederate/cn=Admins,ou=Groups,dc=example,dc=com,pingfederate/cn=Devs")
+
+	code, items := getAuthGroupsQuery(t, s, q)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if len(items) != len(ids) {
+		t.Fatalf("resolved %+v, want %q", items, ids)
+	}
+	for i, id := range ids {
+		if items[i].ID != id || items[i].Name != strings.TrimPrefix(id, groupIDPrefix) {
+			t.Errorf("group %d = %+v, want ID %q", i, items[i], id)
+		}
+	}
+
+	tooMany := url.Values{}
+	for i := range authcommon.MaxGroupIDsPerRequest + 1 {
+		tooMany.Add("id", fmt.Sprintf("pingfederate/g%d", i))
+	}
+	if code, _ := getAuthGroupsQuery(t, s, tooMany); code != http.StatusBadRequest {
+		t.Errorf("%d ids: status = %d, want 400", authcommon.MaxGroupIDsPerRequest+1, code)
 	}
 }
 

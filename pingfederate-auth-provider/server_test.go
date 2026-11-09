@@ -45,6 +45,11 @@ func newTestServer(t *testing.T, userinfoURL string, cacheTTL time.Duration) *se
 func userinfoServer(t *testing.T, calls *atomic.Int32, claims map[string]any) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the code under test sends GET or POST; a HEAD is a probe from
+		// the environment, such as a sandbox discovering the listening port.
+		if r.Method == http.MethodHead {
+			return
+		}
 		calls.Add(1)
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			w.WriteHeader(http.StatusUnauthorized)

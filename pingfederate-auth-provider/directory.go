@@ -72,18 +72,26 @@ func (s *server) fetchGroupPage(ctx context.Context, req authcommon.PageRequest)
 	return authcommon.PageResult{Items: items, NextCursor: next}, nil
 }
 
-// getAuthGroups serves GET /obot-get-auth-groups?ids=, which Obot calls to
-// name group IDs it has not stored yet. A group's name is its ID without the
-// prefix, so every ID in this provider's namespace resolves, whether or not it
-// has been seen.
+// getAuthGroups serves GET /obot-get-auth-groups, which Obot calls to name
+// group IDs it has not stored yet. A group's name is its ID without the prefix,
+// so every ID in this provider's namespace resolves, whether or not it has been
+// seen.
 //
-// It does not use authcommon's GetGroupsHandler, whose parser splits the
-// comma-joined ids at every comma and so breaks an LDAP DN, the form
-// PingFederate's groups usually take, into pieces. This keeps a DN whole when
-// Obot sends it whole; Obot's own /api/groups?ids= also splits at commas
-// before asking, which this provider cannot undo.
+// Obot sends each ID whole in a repeated id parameter, and the same IDs joined
+// with commas in ids for providers that predate id. It does not use
+// authcommon's GetGroupsHandler, which reads only ids and splits it at every
+// comma, breaking an LDAP DN, the form PingFederate's groups usually take.
 func (s *server) getAuthGroups(w http.ResponseWriter, r *http.Request) {
-	names, err := parseGroupIDs(r.URL.Query().Get("ids"))
+	query := r.URL.Query()
+	var (
+		names []string
+		err   error
+	)
+	if ids := query["id"]; len(ids) > 0 {
+		names, err = namesInNamespace(ids)
+	} else {
+		names, err = parseGroupIDs(query.Get("ids"))
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -94,10 +102,30 @@ func (s *server) getAuthGroups(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// parseGroupIDs reads Obot's comma-joined group IDs and returns the names of
-// those in this provider's namespace, without the prefix. Obot joins the IDs
-// with commas without escaping them, so a comma may separate two IDs or belong
-// to an LDAP DN, the form PingFederate's groups usually take. A piece that
+// namesInNamespace returns the names of the whole group IDs in this provider's
+// namespace, without the prefix. Other providers' IDs, blanks, and duplicates
+// are dropped.
+func namesInNamespace(ids []string) ([]string, error) {
+	if len(ids) > authcommon.MaxGroupIDsPerRequest {
+		return nil, fmt.Errorf("%w: %d ids, limit is %d", authcommon.ErrTooManyIDs, len(ids), authcommon.MaxGroupIDsPerRequest)
+	}
+	names := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		name, ok := strings.CutPrefix(strings.TrimSpace(id), groupIDPrefix)
+		if !ok || name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// parseGroupIDs reads the comma-joined group IDs of an Obot that does not send
+// id, and returns the names of those in this provider's namespace, without the
+// prefix. Obot joins the IDs with commas without escaping them, so a comma may
+// separate two IDs or belong to an LDAP DN. A piece that
 // starts with a provider prefix, such as "pingfederate/" or "entra/", starts a
 // new ID; no DN component can, since an attribute type has no "/". Any other
 // piece, or one that follows an escaped comma, continues the ID before it.
@@ -134,17 +162,11 @@ func parseGroupIDs(raw string) ([]string, error) {
 		}
 	}
 
-	names := make([]string, 0, len(ids))
-	seen := make(map[string]bool, len(ids))
+	joined := make([]string, 0, len(ids))
 	for _, pieces := range ids {
-		name, ok := strings.CutPrefix(strings.TrimSpace(strings.Join(pieces, ",")), groupIDPrefix)
-		if !ok || name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		names = append(names, name)
+		joined = append(joined, strings.Join(pieces, ","))
 	}
-	return names, nil
+	return namesInNamespace(joined)
 }
 
 // groupIDStart matches the start of an Obot group ID: a provider prefix such as

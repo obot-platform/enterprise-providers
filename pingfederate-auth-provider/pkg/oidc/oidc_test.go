@@ -222,6 +222,11 @@ func TestTimeClaim(t *testing.T) {
 func TestHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	var plainCalls atomic.Int32
 	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the code under test sends GET or POST; a HEAD is a probe from
+		// the environment, such as a sandbox discovering the listening port.
+		if r.Method == http.MethodHead {
+			return
+		}
 		plainCalls.Add(1)
 		_ = json.NewEncoder(w).Encode(map[string]any{"sub": "u1", "issuer": "x"})
 	}))

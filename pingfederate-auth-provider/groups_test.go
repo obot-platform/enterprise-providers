@@ -102,7 +102,12 @@ func TestUserinfoWithoutGroupsClaimMeansNoGroups(t *testing.T) {
 // asked again on every request.
 func TestRecordSessionFallsBackWhenUserinfoFails(t *testing.T) {
 	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the code under test sends GET or POST; a HEAD is a probe from
+		// the environment, such as a sandbox discovering the listening port.
+		if r.Method == http.MethodHead {
+			return
+		}
 		calls.Add(1)
 		http.Error(w, "down", http.StatusServiceUnavailable)
 	}))
@@ -398,6 +403,11 @@ func TestPostgresGroupStoreDoesNotRecreateDroppedTables(t *testing.T) {
 func TestUserinfoFailureKeepsRecordedGroups(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the code under test sends GET or POST; a HEAD is a probe from
+		// the environment, such as a sandbox discovering the listening port.
+		if r.Method == http.MethodHead {
+			return
+		}
 		calls.Add(1)
 		if r.Header.Get("Authorization") != "Bearer fresh" {
 			w.WriteHeader(http.StatusUnauthorized)
