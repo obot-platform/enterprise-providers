@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -116,12 +115,14 @@ func TestDirectoryDropsOldestSeenGroupsButKeepsDeclared(t *testing.T) {
 	}
 }
 
-// getAuthGroups asks the way an Obot that predates the id parameter does: the
-// IDs joined with commas in ids.
+// getAuthGroups asks the way Obot does (pkg/gateway/client/group.go): each ID
+// in its own id parameter, and the same IDs joined with commas in ids, for the
+// providers that read only that.
 func getAuthGroups(t *testing.T, s *server, ids []string) (int, state.GroupInfoList) {
 	t.Helper()
 	q := url.Values{}
 	q.Set("ids", strings.Join(ids, ","))
+	q["id"] = ids
 	return getAuthGroupsQuery(t, s, q)
 }
 
@@ -153,30 +154,9 @@ func TestGetAuthGroupsResolvesIDsInNamespace(t *testing.T) {
 	if code, _ := getAuthGroups(t, s, nil); code != http.StatusBadRequest {
 		t.Errorf("without ids: status = %d, want 400", code)
 	}
-}
-
-// An older Obot joins the IDs with unescaped commas, and PingFederate's groups
-// are usually LDAP DNs, so every DN it sends whole must come back whole, under
-// the exact ID it asked for.
-func TestGetAuthGroupsKeepsDNsWhole(t *testing.T) {
-	s := newTestServer(t, "", time.Minute)
-	ids := []string{
-		"pingfederate/cn=group.0,ou=Groups,dc=example,dc=com",
-		"pingfederate/devs",
-		"pingfederate/cn=Smith\\, John,ou=People, dc=example,dc=com",
-		"pingfederate/cn=a/b,ou=Groups",
-	}
-	code, items := getAuthGroups(t, s, ids)
-	if code != http.StatusOK {
-		t.Fatalf("status = %d", code)
-	}
-	if len(items) != len(ids) {
-		t.Fatalf("resolved %d groups, want %d: %+v", len(items), len(ids), items)
-	}
-	for i, id := range ids {
-		if items[i].ID != id || items[i].Name != strings.TrimPrefix(id, groupIDPrefix) {
-			t.Errorf("group %d = %+v, want ID %q", i, items[i], id)
-		}
+	// Only id is read: the comma-joined ids alone cannot carry a DN whole.
+	if code, _ := getAuthGroupsQuery(t, s, url.Values{"ids": {"pingfederate/devs"}}); code != http.StatusBadRequest {
+		t.Errorf("with ids alone: status = %d, want 400", code)
 	}
 }
 
@@ -215,104 +195,6 @@ func TestGetAuthGroupsReadsRepeatedID(t *testing.T) {
 	}
 	if code, _ := getAuthGroupsQuery(t, s, tooMany); code != http.StatusBadRequest {
 		t.Errorf("%d ids: status = %d, want 400", authcommon.MaxGroupIDsPerRequest+1, code)
-	}
-}
-
-func TestParseGroupIDs(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		raw  string
-		want []string
-	}{
-		{
-			name: "plain names",
-			raw:  "pingfederate/a,pingfederate/b",
-			want: []string{"a", "b"},
-		},
-		{
-			name: "DNs",
-			raw:  "pingfederate/cn=a,ou=x,pingfederate/cn=b,ou=y",
-			want: []string{"cn=a,ou=x", "cn=b,ou=y"},
-		},
-		{
-			name: "pieces before the first ID are dropped",
-			raw:  "ou=x,dc=y,pingfederate/a",
-			want: []string{"a"},
-		},
-		{
-			name: "duplicates and empty names are dropped",
-			raw:  "pingfederate/a,pingfederate/,pingfederate/a",
-			want: []string{"a"},
-		},
-		{
-			name: "other providers' IDs are dropped, not joined onto a DN",
-			raw:  "pingfederate/cn=a,ou=x,entra/1234,pingfederate/b,okta/cn=c,ou=y",
-			want: []string{"cn=a,ou=x", "b"},
-		},
-		{
-			name: "blank pieces between IDs or at the end are skipped",
-			raw:  "pingfederate/a,,pingfederate/b, ,",
-			want: []string{"a", "b"},
-		},
-		{
-			name: "an empty DN component is kept",
-			raw:  "pingfederate/cn=a,,ou=x,pingfederate/b",
-			want: []string{"cn=a,,ou=x", "b"},
-		},
-		{
-			name: "a blank escaped component is kept",
-			raw:  `pingfederate/cn=a\, ,ou=x,pingfederate/b`,
-			want: []string{`cn=a\, ,ou=x`, "b"},
-		},
-		{
-			name: "a piece after an escaped comma continues the DN",
-			raw:  `pingfederate/cn=Smith\, Jr/Sr,ou=People,pingfederate/b`,
-			want: []string{`cn=Smith\, Jr/Sr,ou=People`, "b"},
-		},
-		{
-			name: "an escaped backslash does not escape the comma after it",
-			raw:  `pingfederate/cn=a\\,pingfederate/b`,
-			want: []string{`cn=a\\`, "b"},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseGroupIDs(tc.raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
-				t.Errorf("parseGroupIDs(%q) = %q, want %q", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
-// The limit counts IDs, not the commas inside them.
-func TestParseGroupIDsLimitCountsWholeIDs(t *testing.T) {
-	dns := make([]string, authcommon.MaxGroupIDsPerRequest)
-	for i := range dns {
-		dns[i] = fmt.Sprintf("pingfederate/cn=group.%d,ou=Groups,dc=example,dc=com", i)
-	}
-	if got, err := parseGroupIDs(strings.Join(dns, ",")); err != nil || len(got) != len(dns) {
-		t.Errorf("%d DNs: %d names, err = %v", len(dns), len(got), err)
-	}
-	dns = append(dns, "pingfederate/one-too-many")
-	if _, err := parseGroupIDs(strings.Join(dns, ",")); !errors.Is(err, authcommon.ErrTooManyIDs) {
-		t.Errorf("%d IDs: err = %v, want ErrTooManyIDs", len(dns), err)
-	}
-}
-
-// Parsing takes time in proportion to the input, however many of its commas
-// belong to one ID.
-func TestParseGroupIDsIsLinear(t *testing.T) {
-	raw := "pingfederate/cn=a" + strings.Repeat(",ou=x", 200_000)
-	start := time.Now()
-	names, err := parseGroupIDs(raw)
-	if err != nil || len(names) != 1 {
-		t.Fatalf("names = %d, err = %v", len(names), err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("parsing %d bytes took %v", len(raw), elapsed)
 	}
 }
 

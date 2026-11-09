@@ -3,10 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -78,20 +77,17 @@ func (s *server) fetchGroupPage(ctx context.Context, req authcommon.PageRequest)
 // seen.
 //
 // Obot sends each ID whole in a repeated id parameter, and the same IDs joined
-// with commas in ids for providers that predate id. It does not use
-// authcommon's GetGroupsHandler, which reads only ids and splits it at every
-// comma, breaking an LDAP DN, the form PingFederate's groups usually take.
+// with commas in ids for the providers that read only that. This provider reads
+// only id: PingFederate's groups are usually LDAP DNs, which contain commas, so
+// the comma-joined list cannot be split back into them. It does not use
+// authcommon's GetGroupsHandler, which reads ids.
 func (s *server) getAuthGroups(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	var (
-		names []string
-		err   error
-	)
-	if ids := query["id"]; len(ids) > 0 {
-		names, err = namesInNamespace(ids)
-	} else {
-		names, err = parseGroupIDs(query.Get("ids"))
+	ids := r.URL.Query()["id"]
+	if !slices.ContainsFunc(ids, func(id string) bool { return strings.TrimSpace(id) != "" }) {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
 	}
+	names, err := namesInNamespace(ids)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -121,54 +117,3 @@ func namesInNamespace(ids []string) ([]string, error) {
 	}
 	return names, nil
 }
-
-// parseGroupIDs reads the comma-joined group IDs of an Obot that does not send
-// id, and returns the names of those in this provider's namespace, without the
-// prefix. Obot joins the IDs with commas without escaping them, so a comma may
-// separate two IDs or belong to an LDAP DN. A piece that
-// starts with a provider prefix, such as "pingfederate/" or "entra/", starts a
-// new ID; no DN component can, since an attribute type has no "/". Any other
-// piece, or one that follows an escaped comma, continues the ID before it.
-// IDs of other providers are dropped. Blank pieces between IDs or at the end
-// are dropped too, while one inside an ID, such as an empty DN component, is
-// kept so that the ID comes back as it was asked for.
-func parseGroupIDs(raw string) ([]string, error) {
-	if raw == "" {
-		return nil, errors.New("ids is required")
-	}
-	var (
-		ids     [][]string
-		blanks  int // blank pieces after the current ID, kept only if it continues
-		escaped bool
-	)
-	for _, piece := range strings.Split(raw, ",") {
-		continues := escaped
-		escaped = (len(piece)-len(strings.TrimRight(piece, `\`)))%2 == 1
-		trimmed := strings.TrimSpace(piece)
-		switch {
-		case trimmed == "" && !continues:
-			blanks++
-		case !continues && groupIDStart.MatchString(trimmed):
-			if len(ids) == authcommon.MaxGroupIDsPerRequest {
-				return nil, fmt.Errorf("%w: limit is %d", authcommon.ErrTooManyIDs, authcommon.MaxGroupIDsPerRequest)
-			}
-			ids = append(ids, []string{piece})
-			blanks = 0
-		case len(ids) > 0:
-			for ; blanks > 0; blanks-- {
-				ids[len(ids)-1] = append(ids[len(ids)-1], "")
-			}
-			ids[len(ids)-1] = append(ids[len(ids)-1], piece)
-		}
-	}
-
-	joined := make([]string, 0, len(ids))
-	for _, pieces := range ids {
-		joined = append(joined, strings.Join(pieces, ","))
-	}
-	return namesInNamespace(joined)
-}
-
-// groupIDStart matches the start of an Obot group ID: a provider prefix such as
-// "pingfederate/".
-var groupIDStart = regexp.MustCompile(`^[A-Za-z0-9_-]+/`)

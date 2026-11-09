@@ -479,7 +479,8 @@ func TestKnownGroupsBackObotGroupSearch(t *testing.T) {
 		t.Errorf("filtered first page = %q", groupNames(items))
 	}
 
-	resp, err := http.Get(p.url + "/obot-get-auth-groups?ids=pingfederate%2FLDAP-Obot-Auditors")
+	// As Obot asks: each ID in id, and the same IDs joined in ids.
+	resp, err := http.Get(p.url + "/obot-get-auth-groups?id=pingfederate%2FLDAP-Obot-Auditors&ids=pingfederate%2FLDAP-Obot-Auditors")
 	if err != nil {
 		t.Fatal(err)
 	}
