@@ -695,6 +695,10 @@ func TestRefreshingRequestRecordsFromRefreshedSession(t *testing.T) {
 	if len(ss.SetCookies) == 0 {
 		t.Fatal("expected a refresh")
 	}
+	// Loading the refreshed session must not refresh it again.
+	if got := idp.Counts().Refresh; got != 1 {
+		t.Errorf("refresh token grants = %d, want 1", got)
+	}
 	if got := groupNames(ss.GroupInfos); got != "pingfederate/devs=devs" {
 		t.Errorf("groups in the refreshing request's state = %q, want the refreshed session's", got)
 	}

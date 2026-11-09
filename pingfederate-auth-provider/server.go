@@ -442,40 +442,42 @@ func (s *server) sessionGroups(ctx context.Context, token, subject string, idTok
 		issued := oidc.TimeClaim(idTokenClaims, "iat")
 		return tokenGroups, issued, !issued.IsZero()
 	}
-	current, ok := s.currentGroups(ctx, token, subject)
+	current, ok, asked := s.currentGroups(ctx, token, subject)
 	if !ok {
 		return tokenGroups, time.Time{}, false
 	}
-	if len(current.groups) == 0 && len(tokenGroups) > 0 {
+	if asked && len(current.groups) == 0 && len(tokenGroups) > 0 {
 		// Groups released in the ID token but not in userinfo are not read,
-		// so this user is recorded with none. Make the likely
-		// misconfiguration visible.
-		slog.Warn("the ID token carries groups but userinfo does not; recording no groups. Release the groups attribute in userinfo", "claim", s.cfg.GroupsClaim)
+		// so such a user is recorded with none. Logged once per access token,
+		// when userinfo is asked, since it may also just mean the user was
+		// removed from every group after signing in.
+		slog.Warn("userinfo reports no groups although the session's ID token lists some; if PingFederate releases groups only in the ID token, release them in userinfo too", "claim", s.cfg.GroupsClaim)
 	}
 	return current.groups, current.observedAt, true
 }
 
 // currentGroups returns what userinfo reports about the groups of the user
-// behind an access token, and whether it answered for subject. It asks
+// behind an access token, whether it answered for subject, and whether
+// userinfo was asked now rather than answered from the cache. It asks
 // userinfo once per access token, and each refresh brings a new token, so
 // groups follow PingFederate within one token refresh duration.
-func (s *server) currentGroups(ctx context.Context, token, subject string) (userinfoGroups, bool) {
+func (s *server) currentGroups(ctx context.Context, token, subject string) (result userinfoGroups, ok, asked bool) {
 	if token == "" {
-		return userinfoGroups{}, false
+		return userinfoGroups{}, false, false
 	}
-	if cached, ok := s.tokenGroups.Get(token); ok {
-		return cached, cached.subject == subject
+	if cached, found := s.tokenGroups.Get(token); found {
+		return cached, cached.subject == subject, false
 	}
 	if _, failed := s.tokenGroupsFailed.Get(token); failed {
-		return userinfoGroups{}, false
+		return userinfoGroups{}, false, false
 	}
 	claims, answeredAt, err := s.userinfoClaims(ctx, token)
 	if err != nil {
 		slog.Warn("could not read the user's current groups from userinfo; keeping their recorded groups", "error", err)
 		s.tokenGroupsFailed.Add(token, struct{}{})
-		return userinfoGroups{}, false
+		return userinfoGroups{}, false, true
 	}
-	result := userinfoGroups{
+	result = userinfoGroups{
 		subject:    oidc.StringClaim(claims, "sub"),
 		observedAt: answeredAt,
 		groups:     oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter),
@@ -485,9 +487,9 @@ func (s *server) currentGroups(ctx context.Context, token, subject string) (user
 		// OpenID Connect requires the userinfo subject to match the ID token's
 		// before the response is used.
 		slog.Warn("userinfo answered for a different subject than the session's; ignoring its groups")
-		return userinfoGroups{}, false
+		return userinfoGroups{}, false, true
 	}
-	return result, true
+	return result, true, true
 }
 
 // getUserInfo returns the user's profile for the access token in the
