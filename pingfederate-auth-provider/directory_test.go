@@ -152,7 +152,10 @@ func TestGetAuthGroupsResolvesIDsInNamespace(t *testing.T) {
 		t.Errorf("resolved = %q", got)
 	}
 	if code, _ := getAuthGroups(t, s, nil); code != http.StatusBadRequest {
-		t.Errorf("without ids: status = %d, want 400", code)
+		t.Errorf("without id: status = %d, want 400", code)
+	}
+	if code, _ := getAuthGroups(t, s, []string{"", " "}); code != http.StatusBadRequest {
+		t.Errorf("with only blank id values: status = %d, want 400", code)
 	}
 	// Only id is read: the comma-joined ids alone cannot carry a DN whole.
 	if code, _ := getAuthGroupsQuery(t, s, url.Values{"ids": {"pingfederate/devs"}}); code != http.StatusBadRequest {
