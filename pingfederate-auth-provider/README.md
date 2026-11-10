@@ -12,12 +12,19 @@ For setup instructions, see
 
 ## PingFederate setup
 
+The provider requests the `openid`, `profile`, and `email` scopes. PingFederate defines
+only `openid` by default and rejects a sign-in that requests a scope it doesn't know, so
+add `profile` and `email` as common scopes under **System > OAuth Settings > Scope
+Management** if they aren't already defined.
+
 Create an OAuth client for Obot under **Applications > OAuth > Clients**:
 
 - **Client Authentication:** Client Secret.
 - **Redirect URIs:** Obot's URL with a trailing slash, such as `https://obot.example.com/`.
 - **Allowed Grant Types:** Authorization Code and Refresh Token.
 - **Require Proof Key for Code Exchange (PKCE):** may be enabled. Obot always sends one.
+- **Bypass Authorization Approval:** enable it, so that PingFederate doesn't ask users
+  to approve Obot's access when they sign in.
 
 The client's OpenID Connect policy must release these attributes:
 
