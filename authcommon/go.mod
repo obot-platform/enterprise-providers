@@ -4,7 +4,10 @@ go 1.27
 
 replace github.com/oauth2-proxy/oauth2-proxy/v7 => github.com/obot-platform/oauth2-proxy/v7 v7.0.0-20261111173230-bd0915cab8cd
 
-require github.com/obot-platform/providers/auth-providers-common v0.0.0-20261105175221-d62ef1d5bdc1
+require (
+	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1
+	github.com/obot-platform/providers/auth-providers-common v0.0.0-20261105175221-d62ef1d5bdc1
+)
 
 require (
 	cloud.google.com/go/auth v0.24.2 // indirect
@@ -36,7 +39,6 @@ require (
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/justinas/alice v1.2.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/oauth2-proxy/oauth2-proxy/v7 v7.8.1 // indirect
 	github.com/pandatix/go-abnf v0.5.5 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/pierrec/lz4/v4 v4.1.33 // indirect

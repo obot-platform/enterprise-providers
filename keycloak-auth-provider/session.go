@@ -3,13 +3,12 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	oauth2proxy "github.com/oauth2-proxy/oauth2-proxy/v7"
+	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
 
@@ -30,26 +29,10 @@ func verifiedStateHandler(proxy *oauth2proxy.OAuthProxy, allowUnverified bool) h
 			return
 		}
 		request.Header = serialized.Header
-		current, err := state.GetSerializableState(proxy, request)
+		current, _, err := authcommon.LoadFreshState(proxy, request)
 		if err != nil {
 			state.WriteStateError(w, err)
 			return
-		}
-		// The shared helper refreshes the session but returns the original session's
-		// fields. Reload refreshed cookies so neither policy nor identity uses old claims.
-		if len(current.SetCookies) > 0 {
-			setCookies, cookieErr := replaceSessionCookies(request, current.SetCookies, proxy.CookieOptions.Name)
-			if cookieErr != nil {
-				state.WriteStateError(w, cookieErr)
-				return
-			}
-			refreshed, loadErr := state.GetSerializableState(proxy, request)
-			if loadErr != nil {
-				state.WriteStateError(w, loadErr)
-				return
-			}
-			refreshed.SetCookies = setCookies
-			current = refreshed
 		}
 		if !allowUnverified {
 			if reason := unverifiedEmailReason(current.IDToken); reason != "" {
@@ -89,68 +72,4 @@ func unverifiedEmailReason(idToken string) string {
 		return "Keycloak has not verified the user's email (email_verified is false); verify it in Keycloak, or enable Allow Unverified Emails"
 	}
 	return ""
-}
-
-// Replace the whole session-cookie family, not individual names: Save can switch
-// between unsplit and split cookies or produce fewer chunks without clearing old ones.
-// Return deletion headers too, so the browser and this request load the same session.
-func replaceSessionCookies(request *http.Request, headers []string, name string) ([]string, error) {
-	response := http.Response{Header: http.Header{"Set-Cookie": headers}}
-	fresh := response.Cookies()
-	var template *http.Cookie
-	for _, cookie := range fresh {
-		if isSessionCookie(cookie.Name, name) && cookie.MaxAge >= 0 && cookie.Value != "" {
-			template = cookie
-			break
-		}
-	}
-	if template == nil {
-		return nil, errors.New("refresh returned no session cookie")
-	}
-	original := request.Cookies()
-	cookies := make(map[string]*http.Cookie, len(original)+len(fresh))
-	for _, cookie := range original {
-		if !isSessionCookie(cookie.Name, name) {
-			cookies[cookie.Name] = cookie
-		}
-	}
-	for _, cookie := range fresh {
-		if cookie.MaxAge < 0 || (!cookie.Expires.IsZero() && cookie.Expires.Before(time.Now())) {
-			delete(cookies, cookie.Name)
-		} else {
-			cookies[cookie.Name] = cookie
-		}
-	}
-	result := append([]string{}, headers...)
-	for _, cookie := range original {
-		if isSessionCookie(cookie.Name, name) && cookies[cookie.Name] == nil {
-			expired := *template
-			expired.Name = cookie.Name
-			expired.Value = ""
-			expired.MaxAge = -1
-			expired.Expires = time.Unix(1, 0)
-			result = append(result, expired.String())
-		}
-	}
-	request.Header.Del("Cookie")
-	for _, cookie := range cookies {
-		request.AddCookie(cookie)
-	}
-	return result, nil
-}
-
-func isSessionCookie(candidate, name string) bool {
-	if candidate == name {
-		return true
-	}
-	suffix, ok := strings.CutPrefix(candidate, name+"_")
-	if !ok || suffix == "" {
-		return false
-	}
-	for _, digit := range suffix {
-		if digit < '0' || digit > '9' {
-			return false
-		}
-	}
-	return true
 }
