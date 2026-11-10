@@ -1102,3 +1102,32 @@ func TestBriefUserinfoFailureRecoversQuickly(t *testing.T) {
 		t.Errorf("state after the retry delay: status = %d, email %q, want 200 and Ada's", resp.StatusCode, ss.Email)
 	}
 }
+
+// A refreshing request asks userinfo about the new access token only: the old
+// one is being replaced, and a second request could take the state request
+// past Obot's deadline while userinfo hangs.
+func TestRefreshingRequestAsksUserinfoOnce(t *testing.T) {
+	idp := startIDP(t, defaultIDPConfig(), false)
+	// With every claim oauth2-proxy reads in the ID token, email_verified
+	// included, oauth2-proxy itself asks userinfo nothing, so only the
+	// provider's requests are counted.
+	user := adaUser
+	verified := true
+	user.EmailVerified = &verified
+	idp.SetUser(user)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+	p.mustLogin(t)
+	if got := idp.Counts().Userinfo; got != 0 {
+		t.Fatalf("userinfo requests during sign-in = %d, want 0", got)
+	}
+	time.Sleep(2100 * time.Millisecond)
+
+	before := idp.Counts().Userinfo
+	ss := p.mustGetState(t)
+	if len(ss.SetCookies) == 0 {
+		t.Fatal("expected the state request to refresh the session")
+	}
+	if got := idp.Counts().Userinfo - before; got != 1 {
+		t.Errorf("userinfo requests on the refreshing request = %d, want 1, for the new token", got)
+	}
+}

@@ -364,18 +364,32 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	checked := ss
-	subject, idClaims := s.recordSession(r.Context(), &ss)
+	var refreshed state.SerializableState
+	loaded := false
 	if len(ss.SetCookies) > 0 {
 		// The state of a request that refreshed the session is the session
 		// from before the refresh. Load the refreshed one from the cookies the
 		// refresh set, and record from it, so that groups follow the refresh
-		// even if the client never sends those cookies back. It carries the
-		// new access token, so it is the one whose userinfo is checked, and
-		// the identity Obot is given is its: a refresh that returns an ID
-		// token rebuilds the session's email and username, and the
-		// pre-refresh ones may never have been checked.
-		if refreshed, ok := s.refreshedState(req, ss.SetCookies); ok {
+		// even if the client never sends those cookies back.
+		refreshed, loaded = s.refreshedState(req, ss.SetCookies)
+	}
+	checked := ss
+	var (
+		subject  string
+		idClaims map[string]any
+	)
+	if !loaded {
+		subject, idClaims = s.recordSession(r.Context(), &ss)
+	}
+	if len(ss.SetCookies) > 0 {
+		// The refreshed session carries the new access token, so it is the
+		// one whose userinfo is checked, and the identity Obot is given is
+		// its: a refresh that returns an ID token rebuilds the session's email
+		// and username, and the pre-refresh ones may never have been checked.
+		// The pre-refresh session's token is not asked about at all: nothing
+		// is recorded from it, and a second userinfo request could take the
+		// request past Obot's deadline while userinfo hangs.
+		if loaded {
 			subject, idClaims = s.recordSession(r.Context(), &refreshed)
 			checked = refreshed
 			ss.User = refreshed.User
