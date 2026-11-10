@@ -44,8 +44,15 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 
 	// A refresh that returns no ID token leaves the session with the claims, and the groups, of an older one. They
 	// would be reported as current for as long as the refresh token lasts, so the user must sign in again instead.
-	if len(current.SetCookies) > 0 && current.IDToken == previousIDToken {
+	if previousIDToken != "" && current.IDToken == previousIDToken {
 		fmt.Println("ERROR: pingfederate-auth-provider: PingFederate refreshed a session without issuing a new ID token, so the user must sign in again. Enable \"Return ID Token on Refresh Grant\" in the OpenID Connect policy used by Obot's client.")
+		// The refreshed session is stored under the same ticket as before, so it is deleted too: a client that kept the
+		// cookie would otherwise go on loading it, now fresh, with the old ID token and its groups.
+		if err := s.proxy.ClearSessionCookie(discardResponse{header: http.Header{}}, request); err != nil {
+			fmt.Printf("ERROR: pingfederate-auth-provider: failed to delete a session refreshed without a new ID token: %v\n", err)
+			http.Error(w, "failed to end the session", http.StatusInternalServerError)
+			return
+		}
 		state.WriteStateError(w, fmt.Errorf("%w: the refreshed session has no new ID token", state.ErrInvalidSession))
 		return
 	}
@@ -79,3 +86,11 @@ func idTokenIssuedAt(idToken string) (time.Time, bool) {
 	}
 	return time.Unix(claims.IssuedAt, 0), true
 }
+
+// discardResponse is the response writer for clearing a session outside of a browser request; what it is sent is
+// dropped.
+type discardResponse struct{ header http.Header }
+
+func (d discardResponse) Header() http.Header         { return d.header }
+func (d discardResponse) Write(b []byte) (int, error) { return len(b), nil }
+func (d discardResponse) WriteHeader(int)             {}

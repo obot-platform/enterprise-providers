@@ -149,10 +149,17 @@ func (s *groupStore) migrate(ctx context.Context) error {
 	return nil
 }
 
-// setUserGroups replaces the groups recorded for userID with the groups in an ID token issued at issuedAt, unless the
-// groups already recorded come from a newer token. A user may have several sessions, refreshed at different times and
-// served by different replicas, so the newest token wins rather than the latest request. It reports whether the
-// groups were written. groups must already be normalized by normalizeGroups.
+// setUserGroups records groups as userID's groups according to an ID token issued at issuedAt. A user may have
+// several sessions, refreshed at different times and served by different replicas, so the newest token wins rather
+// than the latest request:
+//
+//   - groups from an older token than the recorded ones are not written;
+//   - groups from a newer token replace them;
+//   - groups from a token issued in the same second, whose iat cannot tell which is newer, can only remove groups.
+//     Two such tokens differ only if PingFederate's answer changed within that second, and withholding a group until
+//     the next refresh is the safe way to be wrong.
+//
+// It reports whether anything was written. groups must already be normalized by normalizeGroups.
 func (s *groupStore) setUserGroups(ctx context.Context, userID string, groups []string, issuedAt time.Time) (bool, error) {
 	if groups == nil {
 		// A nil slice is sent as NULL, and "group_name = ANY(NULL)" would keep every old membership.
@@ -165,29 +172,37 @@ func (s *groupStore) setUserGroups(ctx context.Context, userID string, groups []
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// The upsert locks the user's row, whether or not it updates it, so concurrent writes for one user run one after
-	// the other.
-	result, err := tx.ExecContext(ctx,
-		`INSERT INTO `+usersTable+` (user_id, token_issued_at, updated_at) VALUES ($1, $2, now())
-		 ON CONFLICT (user_id) DO UPDATE SET token_issued_at = excluded.token_issued_at, updated_at = excluded.updated_at
-		 WHERE `+usersTable+`.token_issued_at <= excluded.token_issued_at`, userID, issuedAt)
-	if err != nil {
+	// Make sure the user's row exists, then lock it, so that concurrent writes for one user run one after the other
+	// and each sees what the one before it recorded.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO `+usersTable+` (user_id, token_issued_at, updated_at) VALUES ($1, to_timestamp(0), now())
+		 ON CONFLICT (user_id) DO NOTHING`, userID); err != nil {
 		return false, fmt.Errorf("record user: %w", err)
 	}
-	if n, err := result.RowsAffected(); err != nil {
-		return false, err
-	} else if n == 0 {
+	var recordedAt time.Time
+	if err := tx.QueryRowContext(ctx,
+		`SELECT token_issued_at FROM `+usersTable+` WHERE user_id = $1 FOR UPDATE`, userID).Scan(&recordedAt); err != nil {
+		return false, fmt.Errorf("record user: %w", err)
+	}
+	if recordedAt.After(issuedAt) {
 		return false, nil
 	}
+	tie := recordedAt.Equal(issuedAt)
 
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE `+usersTable+` SET token_issued_at = $2, updated_at = now() WHERE user_id = $1`, userID, issuedAt); err != nil {
+		return false, fmt.Errorf("record user: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM `+membershipsTable+` WHERE user_id = $1 AND NOT (group_name = ANY($2))`, userID, groups); err != nil {
 		return false, fmt.Errorf("remove old memberships: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO `+membershipsTable+` (user_id, group_name) SELECT $1, unnest($2::text[])
-		 ON CONFLICT DO NOTHING`, userID, groups); err != nil {
-		return false, fmt.Errorf("add memberships: %w", err)
+	if !tie {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO `+membershipsTable+` (user_id, group_name) SELECT $1, unnest($2::text[])
+			 ON CONFLICT DO NOTHING`, userID, groups); err != nil {
+			return false, fmt.Errorf("add memberships: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err

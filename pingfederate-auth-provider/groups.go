@@ -32,37 +32,51 @@ type groupRecorder struct {
 	store *groupStore
 
 	mu sync.Mutex
-	// known holds, per user, the issue time of the newest ID token this process has seen the store hold groups from
-	// or newer. The store only moves forward, so a token no newer than this needs no write, on any replica.
-	known map[string]time.Time
+	// known holds, per user, the newest write this process knows the store holds or has superseded. The store only
+	// moves forward, so a write from an older token needs no attempt, on any replica, and neither does a repeat of the
+	// same groups from a token of the same second. Other groups from a same-second token are always written, because
+	// the store applies their removals.
+	known map[string]recordedGroups
+}
+
+type recordedGroups struct {
+	issuedAt time.Time
+	groups   string
 }
 
 func newGroupRecorder(store *groupStore) *groupRecorder {
-	return &groupRecorder{store: store, known: map[string]time.Time{}}
+	return &groupRecorder{store: store, known: map[string]recordedGroups{}}
 }
 
 // record stores groups as userID's groups according to an ID token issued at issuedAt.
 func (r *groupRecorder) record(ctx context.Context, userID string, groups []string, issuedAt time.Time) error {
+	groups = normalizeGroups(groups)
+	encoded, err := json.Marshal(groups)
+	if err != nil {
+		return err
+	}
+	fingerprint := string(encoded)
+
 	r.mu.Lock()
 	known, ok := r.known[userID]
 	r.mu.Unlock()
-	if ok && !issuedAt.After(known) {
+	if ok && (issuedAt.Before(known.issuedAt) || issuedAt.Equal(known.issuedAt) && fingerprint == known.groups) {
 		return nil
 	}
 
-	if _, err := r.store.setUserGroups(ctx, userID, normalizeGroups(groups), issuedAt); err != nil {
+	if _, err := r.store.setUserGroups(ctx, userID, groups, issuedAt); err != nil {
 		return err
 	}
 
-	// Whether or not the write happened, the store now holds groups from a token at least this new.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.known) >= maxRememberedUsers {
 		// Forgetting only costs one redundant write per user.
 		clear(r.known)
 	}
-	if issuedAt.After(r.known[userID]) {
-		r.known[userID] = issuedAt
+	// Whether or not the write happened, the store now holds groups from a token at least this new.
+	if known, ok := r.known[userID]; !ok || issuedAt.After(known.issuedAt) {
+		r.known[userID] = recordedGroups{issuedAt: issuedAt, groups: fingerprint}
 	}
 	return nil
 }

@@ -261,11 +261,61 @@ func TestStoreKeepsGroupsFromTheNewestToken(t *testing.T) {
 	if wrote, err := store.setUserGroups(ctx, "alice", []string{"a", "b"}, at(1)); err != nil || wrote {
 		t.Fatalf("groups from an older token: setUserGroups = %v, %v; want no write", wrote, err)
 	}
-	if wrote, err := store.setUserGroups(ctx, "alice", []string{"c"}, at(2)); err != nil || !wrote {
-		t.Fatalf("groups from the same token: setUserGroups = %v, %v; want a write", wrote, err)
+	if wrote, err := store.setUserGroups(ctx, "alice", []string{"c"}, at(3)); err != nil || !wrote {
+		t.Fatalf("groups from a newer token: setUserGroups = %v, %v; want a write", wrote, err)
 	}
 	if got, err := store.userGroups(ctx, "alice"); err != nil || !slices.Equal(got, []string{"c"}) {
 		t.Fatalf("userGroups = %q, %v; want [c]", got, err)
+	}
+}
+
+func TestStoreTokensOfTheSameSecondOnlyRemoveGroups(t *testing.T) {
+	// Two ID tokens issued in the same second carry the same iat, so neither is known to be newer. A difference between
+	// them may only take groups away, until a token of a later second settles it.
+	ctx := t.Context()
+	store := testStore(t)
+
+	for _, step := range []struct {
+		groups []string
+		at     time.Time
+		want   []string
+	}{
+		{groups: []string{"a", "b"}, at: at(2), want: []string{"a", "b"}},
+		{groups: []string{"a", "c"}, at: at(2), want: []string{"a"}},
+		{groups: []string{"a", "b", "c"}, at: at(2), want: []string{"a"}},
+		{groups: []string{"b", "c"}, at: at(3), want: []string{"b", "c"}},
+	} {
+		if _, err := store.setUserGroups(ctx, "alice", step.groups, step.at); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := store.userGroups(ctx, "alice"); err != nil || !slices.Equal(got, step.want) {
+			t.Fatalf("after %q at %v: userGroups = %q, %v; want %q", step.groups, step.at.Unix(), got, err, step.want)
+		}
+	}
+}
+
+func TestRecorderAppliesARemovalFromATokenOfTheSameSecond(t *testing.T) {
+	// Two sessions of one user, issued in the same second, disagree about a group. Whether they are served by one
+	// replica or two, the removal is applied.
+	ctx := t.Context()
+	store := testStore(t)
+	one, other := newGroupRecorder(store), newGroupRecorder(store)
+
+	for _, step := range []struct {
+		recorder *groupRecorder
+		groups   []string
+	}{
+		{recorder: one, groups: []string{"admins", "engineering"}},
+		{recorder: one, groups: []string{"engineering"}},
+		{recorder: one, groups: []string{"admins", "engineering"}},
+		{recorder: other, groups: []string{"admins", "engineering"}},
+	} {
+		if err := step.recorder.record(ctx, "alice", step.groups, at(5)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := store.userGroups(ctx, "alice"); err != nil || !slices.Equal(got, []string{"engineering"}) {
+		t.Fatalf("userGroups = %q, %v; want [engineering]", got, err)
 	}
 }
 

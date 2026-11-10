@@ -39,6 +39,8 @@ type fakePingFederate struct {
 	// omitRefreshIDToken leaves the ID token out of refresh responses, as PingFederate does unless "Return ID Token
 	// on Refresh Grant" is enabled.
 	omitRefreshIDToken bool
+	// refreshDelay holds each refresh grant this long before answering.
+	refreshDelay time.Duration
 	// issuedAt is the iat of the next ID token. Each token advances it by a second, so that tokens issued in one
 	// test are ordered as they would be in real time.
 	issuedAt time.Time
@@ -107,6 +109,11 @@ func (f *fakePingFederate) serve(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if r.Form.Get("grant_type") == "refresh_token" && f.refreshDelay > 0 {
+			f.mu.Unlock()
+			time.Sleep(f.refreshDelay)
+			f.mu.Lock()
 		}
 		token := map[string]any{"access_token": "access-" + time.Now().Format(time.RFC3339Nano), "token_type": "Bearer", "expires_in": 7200, "refresh_token": "refresh"}
 		if r.Form.Get("grant_type") != "refresh_token" || !f.omitRefreshIDToken {
@@ -429,8 +436,92 @@ func TestRefreshWithoutIDTokenSignsOut(t *testing.T) {
 	session := signIn(t, provider)
 
 	expire(session)
-	if code, _ := getStateFor(t, s, session); code != http.StatusUnauthorized {
+	header := sessionCookies(t, s, session)
+	if code := getStateWith(t, s, header); code != http.StatusUnauthorized {
 		t.Fatalf("get-state after a refresh without an ID token: HTTP %d, want 401", code)
+	}
+
+	// The refresh saved the session under the same ticket. Replaying the cookie must not load it, now fresh, with the
+	// old ID token and its groups.
+	if code := getStateWith(t, s, header); code == http.StatusOK {
+		t.Fatal("the original cookie still loads the session after it was rejected")
+	}
+}
+
+// sessionCookies stores session once and returns the request header that carries its cookie, so that a test can send
+// the same cookie more than once.
+func sessionCookies(t *testing.T, s *server, session *sessions.SessionState) http.Header {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "https://obot.example/", nil)
+	saved := httptest.NewRecorder()
+	if err := s.proxy.SaveSession(saved, request, session); err != nil {
+		t.Fatal(err)
+	}
+	for _, cookie := range saved.Result().Cookies() {
+		request.AddCookie(cookie)
+	}
+	return request.Header.Clone()
+}
+
+func getStateWith(t *testing.T, s *server, header http.Header) int {
+	t.Helper()
+	code, _ := getStateWithBody(t, s, header)
+	return code
+}
+
+func getStateWithBody(t *testing.T, s *server, header http.Header) (int, state.SerializableState) {
+	t.Helper()
+	body, err := json.Marshal(state.SerializableRequest{Method: http.MethodGet, URL: "https://obot.example/", Header: header.Clone()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	s.getState(response, httptest.NewRequest(http.MethodPost, "/obot-get-state", bytes.NewReader(body)))
+	var ss state.SerializableState
+	if response.Code == http.StatusOK {
+		if err := json.Unmarshal(response.Body.Bytes(), &ss); err != nil {
+			t.Error(err)
+		}
+	}
+	return response.Code, ss
+}
+
+func TestConcurrentRefreshReturnsTheRefreshedSession(t *testing.T) {
+	// Two requests carry the same session as it falls due. One refreshes it, holding oauth2-proxy's session lock while
+	// PingFederate answers; the other waits for the lock and finds the session already refreshed. Both must answer with
+	// the refreshed session, not the one they loaded before it was refreshed.
+	f := newFakePingFederate(t)
+	f.refreshDelay = 500 * time.Millisecond
+	s, provider := testServer(t, f)
+	session := signIn(t, provider)
+	oldIDToken := session.IDToken
+	expire(session)
+	header := sessionCookies(t, s, session)
+
+	var wg sync.WaitGroup
+	results := make([]state.SerializableState, 2)
+	codes := make([]int, 2)
+	for i := range 2 {
+		wg.Go(func() {
+			if i == 1 {
+				// Start once the first request holds the lock and is waiting on PingFederate.
+				time.Sleep(f.refreshDelay / 2)
+			}
+			codes[i], results[i] = getStateWithBody(t, s, header)
+		})
+	}
+	wg.Wait()
+
+	for i := range 2 {
+		if codes[i] != http.StatusOK {
+			t.Fatalf("request %d: HTTP %d", i, codes[i])
+		}
+		if results[i].IDToken == oldIDToken {
+			t.Errorf("request %d answered with the session as it was before the refresh", i)
+		}
+	}
+	if results[0].IDToken != results[1].IDToken {
+		t.Error("the two requests answered with different sessions")
 	}
 }
 
