@@ -6,7 +6,8 @@
   `email_verified` unless an administrator opts out, while PingFederate, which rarely releases that claim, trusts its
   `email` attribute and tells administrators to map it from a source users cannot edit.
 - A provider that records groups at sign-in instead of looking them up (PingFederate) must say how a group removal
-  reaches Obot, not only how a user removal does, and how to revoke at once. Its records must only move forward: a
+  reaches Obot, not only how a user removal does, and must not suggest a way to apply it sooner that does not exist:
+  deleting the user deletes their account and everything they own, so it is no way to apply a group change. Its records must only move forward: a
   write from an older token must not undo one from a newer token, whichever session or replica makes it.
 - Detect "the refresh returned no new ID token" by comparing the session's ID token before and after the refresh
   (`authcommon.LoadFreshState` returns the previous one), not by the token's age: an age check misfires whenever the

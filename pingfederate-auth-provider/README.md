@@ -75,9 +75,10 @@ sessions, the groups from the most recently issued ID token are kept.
 
 Removing a user from a group in PingFederate therefore takes effect in Obot only at
 their next token refresh or sign-in, and a user who never signs in again keeps the
-groups recorded at their last sign-in. To revoke access at once, delete the user in
-Obot, which ends their sessions; if they can still sign in, their current groups are
-recorded when they do. Alternatively, remove the group's role assignment.
+groups recorded at their last sign-in. There is no way to apply a group change
+sooner; a shorter **Token Refresh Duration** shortens the delay. To withdraw what a
+group grants before then, remove the group's role assignment in Obot, which affects
+every member of the group.
 
 SCIM provisioning is not supported.
 
