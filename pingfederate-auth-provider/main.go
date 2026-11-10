@@ -1,8 +1,4 @@
-// Command pingfederate-auth-provider is an Obot authentication provider for
-// Ping Identity PingFederate, or any other OpenID Connect provider with a
-// standard discovery document. It runs as a daemon next to the Obot server,
-// which forwards the browser's OAuth2 traffic to it and asks it who each
-// request belongs to.
+// Command pingfederate-auth-provider is Obot's auth provider for PingFederate.
 package main
 
 import (

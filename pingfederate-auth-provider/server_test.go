@@ -309,9 +309,7 @@ func TestRecordSession(t *testing.T) {
 		t.Errorf("GroupInfos = %q, want the ID token's", got)
 	}
 
-	// Without a userinfo endpoint, groups come from the ID token, observed
-	// when it was issued: a session without one says nothing current, and
-	// records nothing.
+	// Without userinfo, a session without an ID token records nothing.
 	ss = state.SerializableState{AccessToken: "tok3", User: "u", Groups: []string{"g"}}
 	s.recordSession(t.Context(), &ss)
 	if rec, _ := listGroups(t, s, "u"); rec.Code != http.StatusInternalServerError {

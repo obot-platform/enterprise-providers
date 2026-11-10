@@ -26,37 +26,28 @@ import (
 const (
 	providerName = "pingfederate-auth-provider"
 
-	// providerKind names this provider to authcommon, which binds group
-	// listing cursors to it and strips it, as a prefix, from group IDs.
+	// providerKind names this provider to authcommon, which binds group listing
+	// cursors to it.
 	providerKind = "pingfederate"
-	// groupIDPrefix namespaces the group IDs this provider reports. Obot
-	// rejects groups outside the prefix declared in the manifest, so this
-	// constant and the manifest's groupIDPrefix must agree.
+	// groupIDPrefix must match the manifest's groupIDPrefix.
 	groupIDPrefix = providerKind + "/"
 
 	cacheSize    = 10000
 	cacheTTL     = 24 * time.Hour
 	maxBodyBytes = 64 << 10
 
-	// tokenGroupsRetry is how long to wait before asking userinfo again for
-	// an access token after it failed, doubling with each further failure up
-	// to tokenGroupsMaxRetry. Until then, a session whose identity userinfo
-	// has not yet confirmed fails its requests, so a brief failure costs a few
-	// seconds, while a long outage is not asked about more than once a minute
-	// per token.
+	// After a userinfo failure, ask again after tokenGroupsRetry, doubling up to
+	// tokenGroupsMaxRetry. Short, because an unconfirmed session fails until then.
 	tokenGroupsRetry    = 5 * time.Second
 	tokenGroupsMaxRetry = time.Minute
 
-	// userinfoTimeout bounds the provider's own userinfo request for a
-	// session's groups and identity. It is shorter than the 15 seconds Obot
-	// gives a state request, so that a userinfo endpoint that hangs is
-	// recorded as failing rather than cut off by Obot's deadline every time.
+	// userinfoTimeout is under Obot's 15-second state deadline, so a hanging
+	// userinfo is recorded as a failure instead of cut off by Obot each time.
 	userinfoTimeout = 10 * time.Second
 )
 
-// tokenGroupsTTL is how long userinfo's answer for an access token is reused:
-// until the session is due for a refresh, which brings a new token, so that an
-// answer is never reused much past the point it would have been asked again.
+// tokenGroupsTTL reuses a token's userinfo answer until the session is due for
+// a refresh, which brings a new token.
 func tokenGroupsTTL(cfg *settings) time.Duration {
 	if cfg.refreshDuration > 0 && cfg.refreshDuration < cacheTTL {
 		return cfg.refreshDuration
@@ -64,16 +55,13 @@ func tokenGroupsTTL(cfg *settings) time.Duration {
 	return cacheTTL
 }
 
-// userinfoFailure is when userinfo may be asked again about an access token,
-// and how many times in a row it failed.
+// userinfoFailure is when userinfo may be asked again about a token.
 type userinfoFailure struct {
 	retryAt  time.Time
 	failures int
 }
 
-// userinfoRetryDelay is how long to wait after the nth failure in a row:
-// tokenGroupsRetry, doubling with each further failure, up to
-// tokenGroupsMaxRetry.
+// userinfoRetryDelay is the wait after the nth failure in a row.
 func userinfoRetryDelay(failures int) time.Duration {
 	delay := tokenGroupsRetry
 	for i := 1; i < failures && delay < tokenGroupsMaxRetry; i++ {
@@ -88,17 +76,17 @@ type userinfoGroups struct {
 	observedAt time.Time
 	// subject is the subject userinfo answered for.
 	subject string
-	// email and preferredUsername are the identity claims of the answer,
-	// which oauth2-proxy copies into a session whose ID token lacks them.
+	// email and preferredUsername are read as oauth2-proxy reads them, to
+	// compare with the session (see checkUserinfoClaims).
 	email             string
 	preferredUsername string
-	// groups is the groups claim, empty when userinfo carries none:
-	// PingFederate omits an empty multi-valued attribute.
+	// groups is empty when the claim is missing: PingFederate omits an empty
+	// multi-valued attribute.
 	groups []string
 }
 
-// server wires oauth2-proxy (which owns the OAuth2/OIDC login flow and the
-// session cookie) to the extra endpoints Obot calls on an auth provider.
+// server wires oauth2-proxy, which runs sign-in and the session cookie, to
+// the endpoints Obot calls on an auth provider.
 type server struct {
 	cfg         *settings
 	proxy       *oauth2proxy.OAuthProxy
@@ -106,26 +94,18 @@ type server struct {
 	userinfoURL string
 	listenURL   string
 
-	// store records each user's groups under every identifier Obot might use
-	// for them (subject, user claim, email), and every group seen. Obot asks
-	// for a user's groups by the ID it learned from /obot-get-user-info,
-	// without a token, so the answer has to come from what earlier calls
-	// recorded, possibly on another replica.
+	// store records each user's groups by subject, for Obot's later lookups,
+	// which carry no token and may reach another replica.
 	store groupStore
-	// tokenGroups holds, per access token, the groups userinfo reported for
-	// it. A session's own groups come from its ID token, and PingFederate
-	// does not issue a new ID token on refresh by default, so userinfo is
-	// asked once per access token for the user's current groups.
+	// tokenGroups is the provider's userinfo answer per access token.
 	tokenGroups *expirable.LRU[string, userinfoGroups]
-	// tokenGroupsFailed remembers, briefly, the access tokens for which
-	// userinfo failed, and when to ask again, so that a failing endpoint is
-	// not asked on every request.
+	// tokenGroupsFailed holds tokens whose userinfo request failed recently.
 	tokenGroupsFailed *expirable.LRU[string, userinfoFailure]
-	// idTokenClaims maps an access token to the claims of the ID token issued
-	// with it, as a fallback profile when the userinfo endpoint is unavailable.
+	// idTokenClaims holds each access token's ID token claims, a fallback
+	// profile when userinfo fails.
 	idTokenClaims *expirable.LRU[string, map[string]any]
-	// userinfo caches userinfo responses by access token. Obot asks for the
-	// profile on nearly every request, and PingFederate should not see that.
+	// userinfo caches /obot-get-user-info's userinfo answers, which Obot asks
+	// for on nearly every request.
 	userinfo *expirable.LRU[string, userinfoAnswer]
 	// directory answers Obot's group search and lookups.
 	directory *groupDirectory
@@ -146,8 +126,7 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 	if discovery.Issuer != cfg.issuerURL {
 		return nil, fmt.Errorf("the discovery document reports issuer %q, which does not match the configured issuer URL %q; set the issuer URL to the reported value", discovery.Issuer, cfg.issuerURL)
 	}
-	// oauth2-proxy sends the client secret, codes, and tokens to these
-	// endpoints, and trusts the keys at the JWKS endpoint.
+	// oauth2-proxy sends secrets and tokens to these, and trusts the JWKS keys.
 	for name, endpoint := range map[string]string{
 		"authorization endpoint": discovery.AuthorizationEndpoint,
 		"token endpoint":         discovery.TokenEndpoint,
@@ -203,11 +182,8 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 	return s, nil
 }
 
-// newOAuthProxyWithRetry creates the oauth2-proxy, retrying a failure when
-// sessions are kept in PostgreSQL: oauth2-proxy creates its session tables
-// when it starts, and every replica starts the provider at once when it is
-// first configured, so creating the same tables at the same moment can fail on
-// all but one of them.
+// newOAuthProxyWithRetry retries with PostgreSQL sessions: every replica
+// creates the session tables at once on first start, and all but one can fail.
 func newOAuthProxyWithRetry(cfg *settings, discovery *oidc.Discovery) (*oauth2proxy.OAuthProxy, error) {
 	proxy, err := newOAuthProxy(cfg, discovery)
 	for attempt := 1; err != nil && cfg.PostgresConnectionDSN != "" && attempt < 3; attempt++ {
@@ -218,21 +194,12 @@ func newOAuthProxyWithRetry(cfg *settings, discovery *oidc.Discovery) (*oauth2pr
 	return proxy, err
 }
 
-// newOAuthProxy configures oauth2-proxy's generic OpenID Connect provider for
-// PingFederate. Everything Obot-specific (cookie name, redirect URL, session
-// store) mirrors the other Obot auth providers so the gateway treats this one
-// the same way.
-//
-// oauth2-proxy is given the endpoints from discovery, the document newServer
-// fetched and checked, and does not fetch its own: a second fetch could answer
-// differently, for example from a misconfigured node of a PingFederate cluster,
-// and nothing would check the endpoints it named.
+// newOAuthProxy configures oauth2-proxy for PingFederate from the discovery
+// document newServer checked. oauth2-proxy's own discovery is off: nothing
+// would check the endpoints a second fetch returned.
 func newOAuthProxy(cfg *settings, discovery *oidc.Discovery) (*oauth2proxy.OAuthProxy, error) {
-	// oauth2-proxy sends the client secret, authorization codes, and refresh
-	// tokens through this shared client, which follows redirects. Go keeps the
-	// Authorization header and resends the body on a same-host redirect, even
-	// from HTTPS to plain HTTP, so a redirect is reported as an error instead.
-	// PingFederate redirects none of these endpoints.
+	// Go keeps the Authorization header and body across a same-host redirect,
+	// even to plain HTTP, so oauth2-proxy's client follows none.
 	requests.DefaultHTTPClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -244,28 +211,21 @@ func newOAuthProxy(cfg *settings, discovery *oidc.Discovery) (*oauth2proxy.OAuth
 	provider.ClientID = cfg.ClientID
 	provider.ClientSecret = cfg.ClientSecret
 	provider.OIDCIssuerURL = cfg.issuerURL
-	// The issuer URL still verifies every ID token's issuer, and the JWKS
-	// endpoint its signature.
+	// ID tokens are still checked against the issuer URL and the JWKS keys.
 	provider.SkipOIDCDiscovery = true
 	provider.LoginURL = discovery.AuthorizationEndpoint
 	provider.RedeemURL = discovery.TokenEndpoint
 	provider.ProfileURL = discovery.UserinfoEndpoint
 	provider.OIDCJwksURL = discovery.JwksURI
-	// Discovery used to supply the accepted signature algorithms; without
-	// them oauth2-proxy accepts RS256 only.
+	// Without discovery, oauth2-proxy would accept RS256 only.
 	provider.OIDCEnabledSigningAlgs = discovery.SigningAlgs()
 	provider.Scope = cfg.scopes
 	provider.OIDCEmailClaim = cfg.EmailClaim
-	// The session's User field, which Obot stores as the provider user ID,
-	// is the OIDC subject: oauth2-proxy's default for this provider type and
-	// what Obot's other OIDC providers report. Its legacy "user ID claim"
-	// option is deliberately left alone, because setting it to anything but
-	// "email" silently redefines the email claim as well.
+	// The session's User is the subject, oauth2-proxy's default. Its legacy
+	// user ID claim option is left alone: anything but "email" also redefines
+	// the email claim.
 	provider.OIDCGroupsClaim = cfg.GroupsClaim
-	// PingFederate is a certified OpenID provider: it echoes the nonce,
-	// advertises its issuer, and supports S256 PKCE, so none of these checks
-	// is configurable. They are set explicitly because oauth2-proxy's legacy
-	// defaults skip nonce verification.
+	// Set explicitly: oauth2-proxy's legacy defaults skip the nonce check.
 	provider.InsecureOIDCAllowUnverifiedEmail = false
 	provider.InsecureOIDCSkipIssuerVerification = false
 	provider.InsecureOIDCSkipNonce = false
@@ -324,9 +284,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/obot-get-auth-groups", s.getAuthGroups)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/obot-") {
-			// An Obot-internal endpoint this provider does not know must not
-			// fall through to oauth2-proxy, whose sign-in page would be
-			// mistaken for a provider failure.
+			// oauth2-proxy's sign-in page would look like a provider failure to Obot.
 			notSupported(w, r)
 			return
 		}
@@ -339,9 +297,8 @@ func notSupported(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, fmt.Sprintf("%s is not supported by %s", r.URL.Path, providerName), http.StatusNotFound)
 }
 
-// getState answers Obot's question "who sent this request?" from the session
-// cookie, refreshing the upstream tokens when due, and records what it learned
-// about the user's groups for later lookups.
+// getState identifies the user behind a request from its session cookie,
+// refreshing tokens when due, and records the user's groups.
 func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 	var sr state.SerializableRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&sr); err != nil {
@@ -358,8 +315,7 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 
 	ss, err := state.GetSerializableState(s.proxy, req)
 	if err != nil {
-		// An invalid session answers 401 so Obot clears the cookie instead of
-		// failing the request; anything else is a provider failure.
+		// 401 for an invalid session, so Obot clears the cookie.
 		state.WriteStateError(w, err)
 		return
 	}
@@ -367,10 +323,8 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 	var refreshed state.SerializableState
 	loaded := false
 	if len(ss.SetCookies) > 0 {
-		// The state of a request that refreshed the session is the session
-		// from before the refresh. Load the refreshed one from the cookies the
-		// refresh set, and record from it, so that groups follow the refresh
-		// even if the client never sends those cookies back.
+		// A refreshing request's state is the pre-refresh session; the refreshed
+		// one is in the cookies the refresh set.
 		refreshed, loaded = s.refreshedState(req, ss.SetCookies)
 	}
 	checked := ss
@@ -382,13 +336,9 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 		subject, idClaims = s.recordSession(r.Context(), &ss)
 	}
 	if len(ss.SetCookies) > 0 {
-		// The refreshed session carries the new access token, so it is the
-		// one whose userinfo is checked, and the identity Obot is given is
-		// its: a refresh that returns an ID token rebuilds the session's email
-		// and username, and the pre-refresh ones may never have been checked.
-		// The pre-refresh session's token is not asked about at all: nothing
-		// is recorded from it, and a second userinfo request could take the
-		// request past Obot's deadline while userinfo hangs.
+		// The refreshed session is the one checked and the one Obot gets: a
+		// refresh that returns an ID token rebuilds the email and username. The old
+		// token is not sent to userinfo, which could exceed Obot's deadline.
 		if loaded {
 			subject, idClaims = s.recordSession(r.Context(), &refreshed)
 			checked = refreshed
@@ -419,19 +369,17 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// refreshedState loads the session a refresh just created, by replaying req
-// with the cookies the refresh set in place of the ones it carried. It only
-// loads the session, and never refreshes it again: a second refresh would
-// rotate tokens whose cookies are thrown away here.
+// refreshedState loads the session a refresh created from the cookies it set,
+// without refreshing it again, which would rotate tokens whose cookies are
+// discarded here.
 func (s *server) refreshedState(req *http.Request, setCookies []string) (state.SerializableState, bool) {
 	header := http.Header{}
 	for _, c := range setCookies {
 		header.Add("Set-Cookie", c)
 	}
 	refreshedCookies := (&http.Response{Header: header}).Cookies()
-	// A session cookie may be split into name_0, name_1, ... when large, so
-	// drop every request cookie of a refreshed cookie's family: a leftover
-	// unsplit cookie would otherwise be preferred over the new split ones.
+	// Drop the old cookies of each refreshed cookie's family (name, name_0,
+	// ...): a leftover unsplit cookie would win over new chunks.
 	replaced := map[string]bool{}
 	for _, c := range refreshedCookies {
 		replaced[cookieFamily(c.Name)] = true
@@ -471,20 +419,15 @@ func (s *server) refreshedState(req *http.Request, setCookies []string) (state.S
 	}, true
 }
 
-// expireSupersededCookies returns Set-Cookie headers that delete the cookies
-// of the request that a refresh replaced without setting again. oauth2-proxy
-// splits a large session cookie into name_0, name_1, ... and sets only the
-// names the new session needs. A leftover unsplit cookie would be loaded in
-// preference to the new chunks, and a leftover chunk would be joined onto
-// them, so either would make the next request load an old or corrupt session.
+// expireSupersededCookies deletes the session cookies a refresh did not set
+// again: a leftover unsplit cookie or chunk would corrupt the next load.
 func expireSupersededCookies(req *http.Request, setCookies []string) []string {
 	header := http.Header{}
 	for _, c := range setCookies {
 		header.Add("Set-Cookie", c)
 	}
 	set := map[string]bool{}
-	// The attributes the browser matches a deletion on (path, domain) come
-	// from a cookie the refresh set.
+	// A deletion copies path and domain from a cookie the refresh set.
 	templates := map[string]*http.Cookie{}
 	for _, c := range (&http.Response{Header: header}).Cookies() {
 		set[c.Name] = true
@@ -512,8 +455,7 @@ func expireSupersededCookies(req *http.Request, setCookies []string) []string {
 	return expired
 }
 
-// cookieFamily returns a cookie's name without the _0, _1, ... suffix that
-// oauth2-proxy adds when it splits a large session cookie.
+// cookieFamily strips the _0, _1, ... suffix of a split session cookie.
 func cookieFamily(name string) string {
 	if i := strings.LastIndexByte(name, '_'); i > 0 && i < len(name)-1 {
 		if _, err := strconv.Atoi(name[i+1:]); err == nil {
@@ -532,23 +474,12 @@ const (
 	userinfoUnconfirmed
 )
 
-// checkUserinfoClaims checks a session against the provider's own userinfo
-// answer for its access token.
-//
-// oauth2-proxy reads any claim the ID token lacks, such as the email that
-// PingFederate releases only in userinfo by default, from its own userinfo
-// request, without comparing subjects as OpenID Connect requires. Obot
-// identifies the user by that email and names them by preferred_username. So
-// the session is contradicted when the provider's answer is for another
-// subject, or for none, or carries a different value for a claim the session
-// can only have taken from userinfo. Comparing the claims, not just the
-// subject, also catches two userinfo requests that were answered differently.
-//
-// A session with such claims is unconfirmed when there is no answer to check
-// it against while its access token is still valid, for example because
-// userinfo failed: it fails rather than passes. Once the token has expired,
-// userinfo cannot answer for it; the session stands, and the token the next
-// refresh brings is checked.
+// checkUserinfoClaims checks a session against the provider's userinfo answer
+// for its token. oauth2-proxy copies claims the ID token lacks (by default,
+// PingFederate's email) from userinfo without comparing subjects, and Obot
+// identifies users by email. Comparing the claims too catches two userinfo
+// requests answered differently. With no answer, a session fails while its
+// token is valid; an expired token is checked after the next refresh.
 func (s *server) checkUserinfoClaims(ss state.SerializableState, subject string, idClaims map[string]any) userinfoCheck {
 	if s.userinfoURL == "" || ss.AccessToken == "" || subject == "" {
 		// Without a userinfo endpoint, oauth2-proxy reads no claims from it.
@@ -584,9 +515,8 @@ func (s *server) checkUserinfoClaims(ss state.SerializableState, subject string,
 	return userinfoConsistent
 }
 
-// claimValue looks a claim up the way oauth2-proxy does when it builds a
-// session: by name, then, only if no claim has that name, as a dot-separated
-// path into nested objects. A null value counts as missing.
+// claimValue looks a claim up as oauth2-proxy does: by name, else as a
+// dotted path. Null is missing.
 func claimValue(claims map[string]any, name string) any {
 	if name == "" {
 		return nil
@@ -606,9 +536,7 @@ func claimValue(claims map[string]any, name string) any {
 	return current
 }
 
-// sessionClaim returns a claim as oauth2-proxy copies it into a session: a
-// string as it is, and any other value in its JSON form, as util.CoerceClaim
-// gives it. A missing claim is empty.
+// sessionClaim returns a claim as oauth2-proxy stores it in a session.
 func sessionClaim(claims map[string]any, name string) string {
 	value := claimValue(claims, name)
 	if value == nil {
@@ -621,15 +549,13 @@ func sessionClaim(claims map[string]any, name string) string {
 	return coerced
 }
 
-// recordSession fills in the group information for a session and records it
-// under the user's subject, the identifier Obot looks a user's groups up by,
-// and returns that subject and the claims of the session's ID token.
+// recordSession fills in a session's groups, records them under the user's
+// subject, and returns the subject and the ID token's claims.
 func (s *server) recordSession(ctx context.Context, ss *state.SerializableState) (string, map[string]any) {
 	claims := map[string]any{}
 	claimsReadable := true
 	if ss.IDToken != "" {
-		// oauth2-proxy verified this token when it created or refreshed the
-		// session, so reading its claims without re-verifying is safe.
+		// oauth2-proxy verified this token.
 		parsed, err := oidc.UnverifiedClaims(ss.IDToken)
 		if err != nil {
 			slog.Warn("could not read ID token claims", "error", err)
@@ -646,11 +572,7 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 
 	groups, observedAt, record := s.sessionGroups(ctx, ss.AccessToken, subject, claims)
 	ss.GroupInfos = groupInfos(groups)
-	// The state of a request that refreshed the session is the session from
-	// before the refresh, with its old access token; the refreshed one comes
-	// back in cookies, and the next request records from it. Likewise a
-	// session whose access token has expired, and one whose ID token cannot
-	// be read, say nothing current about the user's groups.
+	// A refreshing, expired or unreadable session says nothing current.
 	if len(ss.SetCookies) > 0 || (ss.ExpiresOn != nil && ss.ExpiresOn.Before(time.Now())) || !claimsReadable {
 		record = false
 	}
@@ -663,17 +585,10 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 	return subject, claims
 }
 
-// sessionGroups returns the user's groups for a session, when they were
-// observed, and whether they are current enough to record for Obot's lookups.
-//
-// With a userinfo endpoint, which PingFederate always has, groups come from
-// userinfo alone: it evaluates the user's attributes when it is asked, while a
-// session's ID token is the one it was created with, which PingFederate does
-// not reissue on refresh by default. A userinfo answer without the groups
-// claim means the user has no groups, since PingFederate omits an empty
-// attribute. If userinfo fails, nothing is recorded, and the existing record
-// stands. Only without a userinfo endpoint are the ID token's groups used,
-// observed when it was issued.
+// sessionGroups returns a session's groups, when they were observed, and
+// whether to record them. Groups come from userinfo when there is an endpoint:
+// PingFederate does not reissue the ID token on refresh by default. A missing
+// claim means no groups; a failure records nothing.
 func (s *server) sessionGroups(ctx context.Context, token, subject string, idTokenClaims map[string]any) ([]string, time.Time, bool) {
 	tokenGroups := oidc.StringsClaim(idTokenClaims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
 	if subject == "" {
@@ -688,20 +603,14 @@ func (s *server) sessionGroups(ctx context.Context, token, subject string, idTok
 		return tokenGroups, time.Time{}, false
 	}
 	if asked && len(current.groups) == 0 && len(tokenGroups) > 0 {
-		// Groups released in the ID token but not in userinfo are not read,
-		// so such a user is recorded with none. Logged once per access token,
-		// when userinfo is asked, since it may also just mean the user was
-		// removed from every group after signing in.
+		// Groups released only in the ID token are not read.
 		slog.Warn("userinfo reports no groups although the session's ID token lists some; if PingFederate releases groups only in the ID token, release them in userinfo too", "claim", s.cfg.GroupsClaim)
 	}
 	return current.groups, current.observedAt, true
 }
 
-// currentGroups returns what userinfo reports about the groups of the user
-// behind an access token, whether it answered for subject, and whether
-// userinfo was asked now rather than answered from the cache. It asks
-// userinfo once per access token, and each refresh brings a new token, so
-// groups follow PingFederate within one token refresh duration.
+// currentGroups returns the userinfo answer for a token, whether it is for
+// subject, and whether userinfo was asked now. Userinfo is asked once per token.
 func (s *server) currentGroups(ctx context.Context, token, subject string) (result userinfoGroups, ok, asked bool) {
 	if token == "" {
 		return userinfoGroups{}, false, false
@@ -713,9 +622,8 @@ func (s *server) currentGroups(ctx context.Context, token, subject string) (resu
 	if failedBefore && time.Now().Before(failure.retryAt) {
 		return userinfoGroups{}, false, false
 	}
-	// The request is not stopped when the caller gives up, for example when
-	// a browser aborts it, which says nothing about userinfo; its own timeout
-	// stops it, so that every failure, a hang included, is userinfo's.
+	// Not stopped by the caller giving up, which says nothing about userinfo;
+	// its own timeout stops it.
 	askCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.userinfoTimeout)
 	defer cancel()
 	claims, answeredAt, err := s.userinfoClaims(askCtx, token)
@@ -737,17 +645,15 @@ func (s *server) currentGroups(ctx context.Context, token, subject string) (resu
 	}
 	s.tokenGroups.Add(token, result)
 	if result.subject != subject {
-		// OpenID Connect requires the userinfo subject to match the ID token's
-		// before the response is used.
+		// OpenID Connect requires the subjects to match.
 		slog.Warn("userinfo answered for a different subject than the session's; ignoring its groups")
 		return userinfoGroups{}, false, true
 	}
 	return result, true, true
 }
 
-// getUserInfo returns the user's profile for the access token in the
-// Authorization header. Obot reads "id" (the subject, used for group lookups)
-// and "name" (the user's display name).
+// getUserInfo returns the profile for a bearer access token. Obot reads "id",
+// which it looks the user's groups up by, and "name".
 func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 	token := bearerToken(r.Header.Get("Authorization"))
 	if token == "" {
@@ -767,11 +673,8 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 		claims = cached
 	}
 
-	// Obot looks the user's groups up by the profile's id, so a userinfo
-	// answer is used only for the session's subject, as OpenID Connect
-	// requires. The session's ID token is unknown here only on a replica that
-	// has not seen the session; userinfo then answers for whoever holds the
-	// access token, which is as much as this request can check.
+	// The id is used for group lookups, so userinfo must answer for the
+	// session's subject. A replica that has not seen the session cannot check.
 	subject := oidc.StringClaim(claims, "sub")
 	idClaims, idClaimsKnown := s.idTokenClaims.Get(token)
 	if fromUserinfo {
@@ -787,9 +690,7 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// PingFederate can release a display-name attribute only in the ID token.
-	// Fill missing name fields from the already-verified session token, while
-	// preserving the userinfo email and every identity/group lookup field.
+	// PingFederate may release name attributes only in the ID token.
 	profileClaims := maps.Clone(claims)
 	if idClaimsKnown && subject != "" && oidc.StringClaim(idClaims, "sub") == subject {
 		for _, name := range []string{s.cfg.NameClaim, "name", "given_name", "family_name", "preferred_username"} {
@@ -801,9 +702,7 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	profile := s.profile(profileClaims)
-	// Record groups only from a live userinfo answer: the cached ID token
-	// claims are the session's, and may hold groups the user has since lost.
-	// An answer without the groups claim means the user has no groups.
+	// Only a live answer is current; a missing claim means no groups.
 	if fromUserinfo {
 		groups := oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
 		s.rememberGroups(r.Context(), subject, groups, answeredAt)
@@ -815,8 +714,8 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// userinfoClaims fetches the userinfo document for an access token, through
-// the cache when one is configured, and returns when PingFederate gave it.
+// userinfoClaims fetches userinfo for a token, through the cache if any, and
+// returns when it answered.
 func (s *server) userinfoClaims(ctx context.Context, token string) (map[string]any, time.Time, error) {
 	if s.userinfoURL == "" {
 		return nil, time.Time{}, fmt.Errorf("no userinfo endpoint is configured")
@@ -843,15 +742,13 @@ type userinfoAnswer struct {
 	at     time.Time
 }
 
-// profile shapes claims into the document Obot expects from
-// /obot-get-user-info. The raw claims are kept alongside the derived fields
-// so nothing an administrator might want to inspect is lost.
+// profile shapes claims into /obot-get-user-info's answer, keeping the raw
+// claims.
 func (s *server) profile(claims map[string]any) map[string]any {
 	out := make(map[string]any, len(claims)+3)
 	maps.Copy(out, claims)
 
-	// The subject is the only identifier groups are recorded under, so it is
-	// the only one Obot is given to look them up by.
+	// Groups are recorded under the subject only.
 	out["id"] = oidc.StringClaim(claims, "sub")
 	out["name"] = oidc.DisplayName(claims, s.cfg.EmailClaim)
 	if name := oidc.StringClaim(claims, s.cfg.NameClaim); strings.TrimSpace(name) != "" {
@@ -863,13 +760,9 @@ func (s *server) profile(claims map[string]any) map[string]any {
 	return out
 }
 
-// listUserAuthGroups returns the groups recorded for a provider user ID. The
-// request body is the bare ID. An unknown ID is reported as an error rather
-// than as "no groups", which Obot would persist, dropping the user's
-// memberships. Obot leaves its stored memberships alone on an error, but fails
-// the request that refreshed them, and retries after a minute. In practice the
-// same request has just recorded the user's groups, so an unknown ID means
-// userinfo failed for a user without a current record.
+// listUserAuthGroups returns the groups recorded for a user ID (the request
+// body). An unknown ID is an error, not "no groups", which Obot would store,
+// dropping the user's memberships.
 func (s *server) listUserAuthGroups(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
 	if err != nil {
@@ -898,17 +791,13 @@ func (s *server) listUserAuthGroups(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// rememberGroups records the group list, observed at observedAt, under the
-// user's subject: the identifier Obot looks a user's groups up by, and the
-// only one, since no user can choose another's. A failure is logged rather
-// than failing the request here; see listUserAuthGroups for what Obot does
-// when a later lookup finds nothing.
+// rememberGroups records a user's groups under their subject, which no user
+// can choose. A failure is logged, not returned.
 func (s *server) rememberGroups(ctx context.Context, subject string, groups []string, observedAt time.Time) {
 	if subject == "" {
 		return
 	}
-	// An observation from the future, such as an ID token from an identity
-	// provider whose clock runs fast, would outrank every later one.
+	// A future observation would outrank every later one.
 	if now := time.Now(); observedAt.After(now) {
 		observedAt = now
 	}
@@ -917,8 +806,7 @@ func (s *server) rememberGroups(ctx context.Context, subject string, groups []st
 	}
 }
 
-// groupInfos converts raw group names into Obot's group documents, with the
-// namespacing prefix Obot requires on the ID and the plain name for display.
+// groupInfos converts group names into Obot's prefixed group IDs.
 func groupInfos(groups []string) state.GroupInfoList {
 	infos := make(state.GroupInfoList, 0, len(groups))
 	for _, g := range groups {

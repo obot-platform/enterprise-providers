@@ -18,55 +18,40 @@ import (
 )
 
 const (
-	// postgresTablePrefix is the prefix of every table this provider keeps in
-	// Obot's database: oauth2-proxy's session tables and the group tables
-	// below. It must agree with postgresTablePrefix in the manifest.
+	// postgresTablePrefix must match the manifest's postgresTablePrefix.
 	postgresTablePrefix = "pingfederate_"
-	// userGroupsTable and seenGroupsTable must agree with postgresTables in
-	// the manifest, which tells Obot to drop them when the provider is
-	// deconfigured.
+	// These must match the manifest's postgresTables, so Obot drops them when
+	// the provider is deconfigured.
 	userGroupsTable = postgresTablePrefix + "user_groups"
 	seenGroupsTable = postgresTablePrefix + "seen_groups"
 
-	// userGroupsTTL is how long a user's recorded groups answer Obot's
-	// lookups without the user being seen again.
+	// userGroupsTTL is how long a user's groups are kept without seeing them.
 	userGroupsTTL = 24 * time.Hour
-	// seenGroupsTTL is how long a group stays in the group picker after the
-	// last time any member signed in with it.
+	// seenGroupsTTL is how long a group stays in the picker after it was seen.
 	seenGroupsTTL = 90 * 24 * time.Hour
-	// maxSeenGroups bounds the groups listed in the group picker, besides the
-	// declared ones.
+	// maxSeenGroups bounds the seen groups in the picker.
 	maxSeenGroups = 10000
-	// renewInterval is how often a record that has not changed is written
-	// again, to keep an active user's record, or a group in use, from
-	// expiring. Anything newer is written at once.
+	// renewInterval is how often an unchanged record is rewritten to keep it
+	// from expiring.
 	renewInterval = time.Hour
 	// pruneInterval is how often expired rows are deleted.
 	pruneInterval = time.Hour
 )
 
-// groupStore remembers each user's groups, for the lookups Obot makes without
-// a token, and every group seen, for the group picker. Every replica of Obot
-// runs its own copy of the provider, so in a multi-replica deployment the
-// store must be shared: postgresGroupStore. Without a database, memoryGroupStore
-// keeps the same records in this process.
+// groupStore keeps each user's groups, for Obot's lookups, and every group
+// seen, for the picker. Multi-replica deployments need postgresGroupStore.
 type groupStore interface {
-	// recordUserGroups records a user's groups, as observed at observedAt:
-	// when userinfo answered, or when the ID token they came from was issued.
-	// An observation older than the one recorded is ignored, so that a
-	// replica holding an older answer cannot overwrite a newer one, whatever
-	// order the writes arrive in. It also records that the groups exist, for
-	// the group picker.
+	// recordUserGroups records a user's groups as observed at observedAt.
+	// An older observation than the recorded one is ignored, whatever order
+	// replicas write in.
 	recordUserGroups(ctx context.Context, key string, groups []string, observedAt time.Time) error
 	// userGroups returns the groups recorded for key, and whether any are.
 	userGroups(ctx context.Context, key string) ([]string, bool, error)
-	// seenGroups returns the recorded groups, most recently seen first, up
-	// to maxSeenGroups.
+	// seenGroups returns up to maxSeenGroups, most recently seen first.
 	seenGroups(ctx context.Context) ([]string, error)
 }
 
-// memoryGroupStore keeps the records in this process. It loses them on a
-// restart and does not share them with other replicas.
+// memoryGroupStore keeps the records in this process only.
 type memoryGroupStore struct {
 	users *expirable.LRU[string, observedGroups]
 
@@ -110,8 +95,7 @@ func (m *memoryGroupStore) addSeenGroups(_ context.Context, groups []string) err
 	for _, name := range groups {
 		m.seen[name] = now
 	}
-	// When full, drop the groups seen least recently, as the PostgreSQL store
-	// lists only the most recently seen.
+	// When full, drop the least recently seen, as PostgreSQL's listing does.
 	for len(m.seen) > maxSeenGroups {
 		var oldest string
 		var oldestAt time.Time
@@ -160,22 +144,15 @@ type seenGroupRow struct {
 	LastSeenAt time.Time `gorm:"not null;index"`
 }
 
-// postgresGroupStore keeps the records in Obot's database, shared by every
-// replica and kept across restarts.
-//
-// Writes are conditional upserts, so that whether a row changes is decided by
-// PostgreSQL, atomically, from what the row holds, and not by anything a
-// replica remembers. A request that brings nothing newer than the row matches
-// no condition, and PostgreSQL leaves the row as it is.
+// postgresGroupStore keeps the records in Obot's database. Writes are
+// conditional upserts, so PostgreSQL decides atomically whether a row changes.
 type postgresGroupStore struct {
 	db  *gorm.DB
 	now func() time.Time
 }
 
-// openPostgresGroupStore connects to Obot's database and creates the tables.
-// They are created only here, when the provider starts: Obot drops them when
-// the provider is deconfigured, possibly while it is still running on another
-// replica, and a write must not bring them back.
+// openPostgresGroupStore creates the tables only at startup, so a write after
+// Obot drops them on deconfigure cannot bring them back.
 func openPostgresGroupStore(cfg *settings) (*postgresGroupStore, error) {
 	db, err := gorm.Open(postgres.Open(cfg.PostgresConnectionDSN), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
@@ -203,10 +180,8 @@ func openPostgresGroupStore(cfg *settings) (*postgresGroupStore, error) {
 	return &postgresGroupStore{db: db, now: time.Now}, nil
 }
 
-// migrateWithRetry creates or updates a table. Every replica starts the
-// provider when it is first configured, and creating the same table at the
-// same moment can fail on all but one of them, so a failure is retried after
-// the winner has had time to finish.
+// migrateWithRetry retries, because replicas create the same tables at once
+// on first start and all but one can fail.
 func migrateWithRetry(db *gorm.DB, table string, model any) error {
 	var err error
 	for attempt := range 3 {
@@ -220,17 +195,12 @@ func migrateWithRetry(db *gorm.DB, table string, model any) error {
 	return fmt.Errorf("create table %s: %w", table, err)
 }
 
-// recordUserGroups reads before it writes. Most requests repeat what is
-// recorded, and a plain read takes no lock, while an INSERT ... ON CONFLICT
-// DO UPDATE locks the conflicting row even when its WHERE leaves the row
-// unchanged: a group every user is in would have its row locked by every
-// request. So one read decides whether anything is newer or due for renewal,
-// and only then do the conditional upserts run. They keep their conditions,
-// so that PostgreSQL still decides, atomically, between replicas writing at
-// the same time.
+// recordUserGroups reads first: an upsert locks the row even when it changes
+// nothing, and most requests repeat what is recorded. The upserts keep their
+// conditions for replicas writing at the same time.
 const (
-	// readRecorded returns the user's recorded observation, if any, and
-	// which of their groups were seen recently enough to need no renewal.
+	// readRecorded returns the recorded observation and the groups that need no
+	// renewal.
 	readRecorded = `SELECT
 	(SELECT observed_at FROM ` + userGroupsTable + ` WHERE user_key = @key) AS observed_at,
 	(SELECT updated_at FROM ` + userGroupsTable + ` WHERE user_key = @key) AS updated_at,
@@ -238,11 +208,8 @@ const (
 		WHERE name IN (SELECT jsonb_array_elements_text(CAST(@groups AS jsonb)))
 		AND last_seen_at > @renewBefore), '[]') AS text) AS fresh_groups`
 
-	// upsertUserGroups writes a user's groups if the observation is newer
-	// than the recorded one, or if it is the same observation and the row is
-	// due for renewal, which keeps an active user's row from expiring, or if
-	// the row has expired: an expired row answers no lookups, so any
-	// observation is better than it, and must not wait for pruning.
+	// upsertUserGroups writes when the observation is newer, when it is the same
+	// and the row is due for renewal, or when the row has expired.
 	upsertUserGroups = `INSERT INTO ` + userGroupsTable + ` AS t (user_key, groups, observed_at, updated_at)
 	VALUES (@key, @groups, @observedAt, @now)
 	ON CONFLICT (user_key) DO UPDATE
@@ -251,9 +218,8 @@ const (
 	   OR (EXCLUDED.observed_at = t.observed_at AND t.updated_at <= @renewBefore)
 	   OR t.updated_at <= @expiredBefore`
 
-	// upsertSeenGroups records groups for the group picker, renewing each at
-	// most once per renewInterval. Rows are written in name order, so that
-	// two statements locking overlapping groups lock them in the same order.
+	// upsertSeenGroups renews each group at most once per renewInterval, in name
+	// order so overlapping statements lock in the same order.
 	upsertSeenGroups = `INSERT INTO ` + seenGroupsTable + ` AS t (name, last_seen_at)
 	SELECT name, CAST(@now AS timestamptz)
 	FROM (SELECT DISTINCT jsonb_array_elements_text(CAST(@seen AS jsonb)) AS name) AS names
@@ -329,8 +295,7 @@ func (p *postgresGroupStore) recordUserGroups(ctx context.Context, key string, g
 	return nil
 }
 
-// truncateToPostgres drops what PostgreSQL's timestamps cannot hold, so that
-// the same observation compares equal to itself once stored.
+// truncateToPostgres keeps an observation equal to itself once stored.
 func truncateToPostgres(t time.Time) time.Time {
 	return t.Truncate(time.Microsecond)
 }
@@ -374,16 +339,15 @@ const pruneSeenGroups = `DELETE FROM ` + seenGroupsTable + ` WHERE name IN (
 	ORDER BY name
 	FOR UPDATE SKIP LOCKED)`
 
-// prune deletes expired rows. Expired rows are already ignored, so this only
-// keeps the tables from growing.
+// prune deletes expired rows, which are already ignored.
 func (p *postgresGroupStore) prune(ctx context.Context) error {
 	now := p.now()
 	if err := p.db.WithContext(ctx).Table(userGroupsTable).
 		Where("updated_at <= ?", now.Add(-userGroupsTTL)).Delete(&userGroupsRow{}).Error; err != nil {
 		return fmt.Errorf("prune user groups: %w", err)
 	}
-	// Lock expired groups in name order, as recordUserGroups does, so the two
-	// cannot deadlock, and skip any a sign-in holds: it is renewing them.
+	// Name order, as in recordUserGroups, so they cannot deadlock; skip rows a
+	// sign-in is renewing.
 	if err := p.db.WithContext(ctx).Exec(pruneSeenGroups, map[string]any{
 		"cutoff": now.Add(-seenGroupsTTL),
 	}).Error; err != nil {
@@ -408,14 +372,13 @@ func (p *postgresGroupStore) pruneEvery(ctx context.Context, interval time.Durat
 	}
 }
 
-// filterGroups returns the trimmed, non-empty, de-duplicated names in order,
-// without names containing a NUL character, which PostgreSQL cannot store.
+// filterGroups trims and de-duplicates names, dropping empty ones and those
+// with a NUL, which PostgreSQL cannot store.
 func filterGroups(groups []string) []string {
 	out := make([]string, 0, len(groups))
 	seen := map[string]bool{}
 	for _, g := range groups {
-		// PostgreSQL text and jsonb cannot hold a NUL character, and one such
-		// name would make every write of the user's groups fail.
+		// One such name would make every write of the user's groups fail.
 		if g = strings.TrimSpace(g); g != "" && !seen[g] && !strings.ContainsRune(g, 0) {
 			seen[g] = true
 			out = append(out, g)
@@ -424,8 +387,7 @@ func filterGroups(groups []string) []string {
 	return out
 }
 
-// sortGroupNames sorts names case-insensitively, then exactly, which is the
-// order the group picker pages through.
+// sortGroupNames is the picker's order: case-insensitive, then exact.
 func sortGroupNames(names []string) {
 	sort.Slice(names, func(i, j int) bool {
 		if a, b := strings.ToLower(names[i]), strings.ToLower(names[j]); a != b {

@@ -1,7 +1,5 @@
-// Package oidc holds the small amount of OpenID Connect plumbing the
-// PingFederate auth provider needs beyond what oauth2-proxy already does:
-// discovery, userinfo lookups, and reading claims out of tokens that
-// oauth2-proxy has already verified.
+// Package oidc is the OpenID Connect plumbing the provider needs besides
+// oauth2-proxy: discovery, userinfo, and reading verified tokens' claims.
 package oidc
 
 import (
@@ -21,8 +19,7 @@ import (
 	"time"
 )
 
-// maxResponseBytes bounds what is read from a discovery document or a userinfo
-// response, which are far smaller in practice.
+// maxResponseBytes bounds a discovery or userinfo response.
 const maxResponseBytes = 1 << 20
 
 // Discovery is the subset of the OpenID Provider Metadata document we use.
@@ -36,9 +33,8 @@ type Discovery struct {
 	IDTokenSigningAlgs []string `json:"id_token_signing_alg_values_supported"`
 }
 
-// asymmetricSigningAlgs are the ID token signature algorithms verifiable with
-// the keys at the JWKS endpoint. PingFederate also advertises none and the
-// HMAC algorithms, which sign with the client secret; neither is accepted.
+// asymmetricSigningAlgs are verifiable with the JWKS keys, unlike none and
+// HMAC, which PingFederate also advertises.
 var asymmetricSigningAlgs = map[string]bool{
 	"RS256": true, "RS384": true, "RS512": true,
 	"PS256": true, "PS384": true, "PS512": true,
@@ -46,8 +42,7 @@ var asymmetricSigningAlgs = map[string]bool{
 	"EdDSA": true,
 }
 
-// SigningAlgs returns the advertised ID token signature algorithms that can be
-// verified with the JWKS endpoint's keys.
+// SigningAlgs returns the advertised algorithms in asymmetricSigningAlgs.
 func (d *Discovery) SigningAlgs() []string {
 	var algs []string
 	for _, alg := range d.IDTokenSigningAlgs {
@@ -58,16 +53,10 @@ func (d *Discovery) SigningAlgs() []string {
 	return algs
 }
 
-// NewHTTPClient returns a client that trusts the system roots plus the PEM
-// bundles at the given paths. It builds its own transport rather than
-// deriving one from http.DefaultTransport, because oauth2-proxy installs its
-// configured CAs into the default transport process-wide and this client's
-// trust must not depend on that.
-//
-// The client does not follow redirects. Go keeps the Authorization header on
-// a redirect to the same host, even from HTTPS to plain HTTP, so following
-// one could send an access token in cleartext; and PingFederate redirects
-// neither discovery nor userinfo.
+// NewHTTPClient trusts the system roots plus the given PEM files. It has its
+// own transport, because oauth2-proxy installs its CAs in the default one.
+// It follows no redirects: Go would keep the Authorization header on a
+// same-host redirect, even to plain HTTP.
 func NewHTTPClient(caFiles []string) (*http.Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if len(caFiles) > 0 {
@@ -128,10 +117,9 @@ func Discover(ctx context.Context, client *http.Client, issuer string) (*Discove
 	return &d, nil
 }
 
-// Userinfo calls the userinfo endpoint with the given bearer token and returns
-// the raw claims. A signed answer (application/jwt), which PingFederate can be
-// configured to give, is read like oauth2-proxy reads it, without checking the
-// signature: it comes over the same verified TLS connection as a JSON answer.
+// Userinfo returns the userinfo claims for a bearer token. A signed answer
+// (application/jwt) is read without checking the signature, as oauth2-proxy
+// does: it arrives over the same verified TLS as JSON.
 func Userinfo(ctx context.Context, client *http.Client, userinfoURL, authorization string) (map[string]any, error) {
 	if userinfoURL == "" {
 		return nil, fmt.Errorf("no userinfo endpoint configured")
@@ -176,9 +164,7 @@ func Userinfo(ctx context.Context, client *http.Client, userinfoURL, authorizati
 	return claims, nil
 }
 
-// redirectTarget describes where a redirect response points, for an error
-// message, since the client does not follow redirects. It is empty for any
-// other response.
+// redirectTarget names a redirect's target in an error, or is empty.
 func redirectTarget(resp *http.Response) string {
 	if location := resp.Header.Get("Location"); location != "" && resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		return fmt.Sprintf(" (a redirect to %s, which is not followed)", location)
@@ -186,17 +172,15 @@ func redirectTarget(resp *http.Response) string {
 	return ""
 }
 
-// decodeClaims decodes a JSON object of claims keeping numbers exact, as
-// json.Number, the way oauth2-proxy reads claims: a number then reads the same
-// here as in the session oauth2-proxy built from it.
+// decodeClaims keeps numbers exact, as oauth2-proxy does.
 func decodeClaims(data []byte, claims *map[string]any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	return decoder.Decode(claims)
 }
 
-// UnverifiedClaims decodes the payload of a JWT without checking its
-// signature. Only call this on tokens oauth2-proxy has already verified.
+// UnverifiedClaims decodes a JWT's payload without checking its signature.
+// Use it only on tokens oauth2-proxy verified.
 func UnverifiedClaims(token string) (map[string]any, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -213,8 +197,7 @@ func UnverifiedClaims(token string) (map[string]any, error) {
 	return claims, nil
 }
 
-// TimeClaim returns a NumericDate claim, such as iat, as a time, or the zero
-// time when absent or not a number.
+// TimeClaim returns a NumericDate claim such as iat, or the zero time.
 func TimeClaim(claims map[string]any, name string) time.Time {
 	switch v := claims[name].(type) {
 	case float64:
@@ -233,12 +216,8 @@ func StringClaim(claims map[string]any, name string) string {
 	return s
 }
 
-// StringsClaim returns a multi-valued claim as a string slice. A JSON array
-// is used as-is: its elements are never split, so that a value such as an
-// LDAP DN, or a group name containing the delimiter, stays one value. A plain
-// string is one value, unless delimiter is set, in which case it is split on
-// the delimiter: PingFederate emits a single delimited string when a
-// multi-valued attribute is mapped as text.
+// StringsClaim returns a multi-valued claim. An array's elements are never
+// split, so an LDAP DN stays whole; a string is split on delimiter if set.
 func StringsClaim(claims map[string]any, name, delimiter string) []string {
 	switch v := claims[name].(type) {
 	case []any:
@@ -262,9 +241,7 @@ func StringsClaim(claims map[string]any, name, delimiter string) []string {
 	}
 }
 
-// SplitValues splits value on delimiter when one is set, trimming whitespace
-// and dropping empty entries. Without a delimiter the whole trimmed value is
-// returned as the only entry.
+// SplitValues splits on delimiter, if set, dropping empty entries.
 func SplitValues(value, delimiter string) []string {
 	parts := []string{value}
 	if delimiter != "" {
@@ -279,8 +256,7 @@ func SplitValues(value, delimiter string) []string {
 	return out
 }
 
-// DisplayName picks the best human-readable name from standard OIDC claims,
-// ending with the configured email claim when nothing better is present.
+// DisplayName picks a name from the standard claims, else the email.
 func DisplayName(claims map[string]any, emailClaim string) string {
 	if name := StringClaim(claims, "name"); name != "" {
 		return name

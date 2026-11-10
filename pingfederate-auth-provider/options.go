@@ -13,12 +13,9 @@ import (
 	"github.com/obot-platform/providers/auth-providers-common/pkg/env"
 )
 
-// Options is every setting the provider reads from its environment. Obot
-// passes the parameters an administrator entered in the admin UI as the
-// environment variables named in the provider manifest, plus PORT and the
-// server URLs. Nothing else from the Obot process environment reaches the
-// provider, which is why trust for a private CA is a provider setting rather
-// than something inherited from the pod.
+// Options are the provider's settings. Obot passes only the manifest's
+// parameters and server URLs, so a private CA is a setting, not inherited
+// from the pod.
 type Options struct {
 	ClientID     string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_ID"`
 	ClientSecret string `env:"OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_SECRET"`
@@ -45,8 +42,7 @@ type Options struct {
 	LoggingEnabled                    string `env:"OBOT_AUTH_PROVIDER_ENABLE_LOGGING" optional:"true"`
 }
 
-// settings is Options after parsing and validation: typed values, normalized
-// URLs, and the CA bundle materialized as files for oauth2-proxy.
+// settings is Options parsed and validated, with the CA bundle as files.
 type settings struct {
 	Options
 
@@ -70,8 +66,7 @@ func loadOptions() (*settings, error) {
 	return opts.resolve()
 }
 
-// resolve validates the raw options and derives the typed settings. It is
-// separate from loadOptions so tests can build Options directly.
+// resolve validates the options, separately from loading them, for tests.
 func (o Options) resolve() (*settings, error) {
 	s := &settings{Options: o}
 	var err error
@@ -110,8 +105,7 @@ func (o Options) resolve() (*settings, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode cookie secret: %w", err)
 	}
-	// Trimmed like the other Obot auth providers, because older installations
-	// stored the secret with a trailing newline.
+	// Older installations stored the secret with a trailing newline.
 	s.cookieSecret = strings.TrimSpace(string(cookieSecret))
 	if n := len(s.cookieSecret); n != 16 && n != 24 && n != 32 {
 		return nil, fmt.Errorf("cookie secret must decode to 16, 24, or 32 bytes, got %d", n)
@@ -146,11 +140,8 @@ func (s *settings) cleanup() {
 	s.tempFiles = nil
 }
 
-// ValidateEndpointURL checks a URL the provider sends credentials or tokens to:
-// the issuer, and the endpoints its discovery document names. It must be an
-// absolute HTTPS URL, or HTTP on a loopback host, without credentials. Over
-// plain HTTP anyone on the network path could read the client secret and
-// tokens, or substitute discovery and signing keys and forge ID tokens.
+// ValidateEndpointURL requires HTTPS, or HTTP on loopback, without credentials,
+// for a URL that gets secrets or tokens or supplies signing keys.
 func ValidateEndpointURL(name, value string) error {
 	u, err := url.Parse(value)
 	if err != nil {
@@ -184,8 +175,8 @@ func parseBool(name, value string) (bool, error) {
 	}
 }
 
-// normalizeScopes accepts scopes separated by spaces or commas and makes sure
-// "openid" is requested, without which the token response carries no ID token.
+// normalizeScopes splits on spaces or commas and adds "openid", without
+// which there is no ID token.
 func normalizeScopes(value string) string {
 	seen := map[string]bool{"openid": true}
 	scopes := []string{"openid"}
@@ -198,15 +189,12 @@ func normalizeScopes(value string) string {
 	return strings.Join(scopes, " ")
 }
 
-// unescapeMultiline restores the line breaks in a value from a multi-line
-// field of Obot's admin UI, which saves each line break as the two characters
-// backslash and n.
+// unescapeMultiline restores line breaks, which the admin UI saves as \n.
 func unescapeMultiline(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, `\r\n`, "\n"), `\n`, "\n")
 }
 
-// splitLines accepts one entry per line. It does not split on commas, which
-// group names such as LDAP DNs contain.
+// splitLines splits on lines only: LDAP DNs contain commas.
 func splitLines(value string) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -229,11 +217,8 @@ func splitList(value string) []string {
 	return out
 }
 
-// resolveCAFiles returns the PEM files that should be trusted in addition to
-// the system roots, and the temporary files among them. A CA given as PEM text
-// (the form that fits an admin UI field) is written to a private temporary
-// file, because oauth2-proxy only accepts certificate authorities as file
-// paths. The caller removes the temporary files with settings.cleanup.
+// resolveCAFiles returns the CA files to trust and the temporary ones among
+// them: oauth2-proxy takes CAs only as files, so PEM text is written to one.
 func resolveCAFiles(caFile, caCertificate string) (files, tempFiles []string, err error) {
 	if caFile = strings.TrimSpace(caFile); caFile != "" {
 		if _, err := os.Stat(caFile); err != nil {

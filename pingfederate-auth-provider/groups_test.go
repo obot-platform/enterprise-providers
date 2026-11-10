@@ -40,9 +40,8 @@ func recordedGroups(t *testing.T, s *server, id string) string {
 	return groupNames(groups)
 }
 
-// A session keeps the groups of the ID token it was created with, and
-// PingFederate issues no new ID token on refresh by default, so the current
-// groups come from userinfo, asked once per access token.
+// Current groups come from userinfo, once per access token: the session's
+// ID token is not reissued on refresh.
 func TestRecordSessionTakesCurrentGroupsFromUserinfo(t *testing.T) {
 	var calls atomic.Int32
 	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "groups": []any{"current"}})
@@ -77,9 +76,8 @@ func TestRecordSessionTakesEmptyUserinfoGroups(t *testing.T) {
 	}
 }
 
-// PingFederate omits an empty multi-valued attribute, so a userinfo answer
-// without the groups claim means the user has no groups now, however many
-// their session's ID token lists.
+// No groups claim in userinfo means no groups: PingFederate omits an empty
+// attribute.
 func TestUserinfoWithoutGroupsClaimMeansNoGroups(t *testing.T) {
 	var calls atomic.Int32
 	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com"})
@@ -126,9 +124,8 @@ func TestRecordSessionFallsBackWhenUserinfoFails(t *testing.T) {
 	}
 }
 
-// End to end: PingFederate's defaults release groups only in userinfo and
-// issue no ID token on refresh. A change to the user's groups must still reach
-// Obot after the next refresh, without the user signing in again.
+// With PingFederate's defaults, a group change reaches Obot after the next
+// refresh.
 func TestGroupChangesFollowRefresh(t *testing.T) {
 	cfg := defaultIDPConfig()
 	cfg.GroupsInIDToken = false
@@ -171,9 +168,8 @@ func TestGroupChangesFollowRefresh(t *testing.T) {
 	}
 }
 
-// testPostgresDSN returns the database for the Postgres tests, which run only
-// when PINGFEDERATE_TEST_POSTGRES_DSN is set, and drops the provider's tables
-// before and after each test.
+// testPostgresDSN skips the test without PINGFEDERATE_TEST_POSTGRES_DSN, and
+// drops the provider's tables before and after it.
 func testPostgresDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("PINGFEDERATE_TEST_POSTGRES_DSN")
@@ -241,9 +237,7 @@ func TestPostgresGroupStore(t *testing.T) {
 		t.Errorf("seen groups on the other replica = %v %v", seen, err)
 	}
 
-	// The scenario the write ordering exists for: replica A records X, replica
-	// B records a later observation Y, and replica A then sends X again from
-	// its older observation. The newer observation must stand.
+	// Replica A's older observation, sent again after B's newer one, must lose.
 	if err := b.recordUserGroups(ctx, "sub-1", []string{"devs"}, t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -290,9 +284,7 @@ func TestPostgresGroupStore(t *testing.T) {
 	}
 }
 
-// Repeating the same observation writes nothing, except a renewal once per
-// renewInterval that keeps an active user's record from expiring. The
-// database decides, not anything the replica remembers.
+// A repeated observation writes nothing but a renewal per renewInterval.
 func TestPostgresGroupStoreRenewsUnchangedRecords(t *testing.T) {
 	dsn := testPostgresDSN(t)
 	store := openTestPostgresStore(t, dsn)
@@ -373,9 +365,7 @@ func TestGroupsSharedAcrossReplicas(t *testing.T) {
 	}
 }
 
-// Obot drops the tables when the provider is deconfigured, possibly while the
-// provider still runs on another replica. A write after that must fail rather
-// than bring the tables back.
+// After Obot drops the tables, a write must fail, not recreate them.
 func TestPostgresGroupStoreDoesNotRecreateDroppedTables(t *testing.T) {
 	dsn := testPostgresDSN(t)
 	store := openTestPostgresStore(t, dsn)
@@ -396,10 +386,8 @@ func TestPostgresGroupStoreDoesNotRecreateDroppedTables(t *testing.T) {
 	}
 }
 
-// A failing userinfo answer must not replace a user's recorded groups with the
-// session's: those are from sign-in, and may include groups since removed.
-// This also covers the session helper handing back a refreshed session's old,
-// expired access token, which userinfo rejects.
+// A userinfo failure keeps the recorded groups, rather than the session's,
+// which may include groups since removed.
 func TestUserinfoFailureKeepsRecordedGroups(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -492,9 +480,7 @@ func TestValidateEndpointURL(t *testing.T) {
 	}
 }
 
-// The in-memory store lists the most recently seen groups first, forgets
-// groups not seen for seenGroupsTTL, and drops the least recently seen when
-// full, like the PostgreSQL store.
+// The in-memory store orders, expires and bounds seen groups like PostgreSQL.
 func TestMemoryGroupStoreSeenGroups(t *testing.T) {
 	store := newMemoryGroupStore()
 	ctx := t.Context()
@@ -558,10 +544,8 @@ func TestPostgresGroupStoreConcurrentStart(t *testing.T) {
 	}
 }
 
-// A request that refreshed the session reports the session from before the
-// refresh, and an expired session's token says nothing current: neither is
-// recorded. Otherwise replaying an old session cookie could keep re-recording
-// groups the user has lost.
+// Refreshing and expired sessions record nothing, so replaying an old cookie
+// cannot keep groups the user lost.
 func TestRefreshingOrExpiredSessionRecordsNothing(t *testing.T) {
 	var calls atomic.Int32
 	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "groups": []any{"admins"}})
@@ -652,9 +636,8 @@ func TestPostgresGroupStoreRepeatedObservationDoesNotWrite(t *testing.T) {
 	}
 }
 
-// End to end, with PingFederate's defaults: removing a user from their last
-// group must reach Obot after the next refresh. PingFederate then omits the
-// groups claim from userinfo altogether.
+// Removal from the last group reaches Obot after the next refresh, though
+// userinfo then omits the groups claim.
 func TestRemovalFromAllGroupsFollowsRefresh(t *testing.T) {
 	cfg := defaultIDPConfig()
 	cfg.GroupsInIDToken = false
@@ -685,9 +668,7 @@ func TestRemovalFromAllGroupsFollowsRefresh(t *testing.T) {
 	}
 }
 
-// A refreshing request reports the session from before the refresh. The
-// provider records from the refreshed session instead, so a client that keeps
-// replaying its old cookie cannot keep the groups it had.
+// A refreshing request records from the refreshed session.
 func TestRefreshingRequestRecordsFromRefreshedSession(t *testing.T) {
 	cfg := defaultIDPConfig()
 	cfg.OmitIDTokenOnRefresh = true
@@ -729,9 +710,7 @@ func TestIDTokenWithoutIssuedAtRecordsNothing(t *testing.T) {
 	}
 }
 
-// An observation from the future, such as from an identity provider whose
-// clock runs fast, is treated as current rather than outranking every later
-// observation.
+// A future observation is treated as current.
 func TestFutureObservationIsCapped(t *testing.T) {
 	s := newTestServer(t, "", time.Minute)
 	s.rememberGroups(t.Context(), "sub-1", []string{"admins"}, time.Now().Add(24*time.Hour))
@@ -741,10 +720,8 @@ func TestFutureObservationIsCapped(t *testing.T) {
 	}
 }
 
-// A repeated observation must not lock the rows it would update: an INSERT
-// ... ON CONFLICT DO UPDATE locks the conflicting row even when its WHERE is
-// false, and a group every user is in would serialize every request. With the
-// rows locked by another transaction, the repeat must still complete.
+// A repeated observation must not lock rows, or a group every user is in
+// would serialize every request.
 func TestPostgresRepeatedObservationTakesNoLocks(t *testing.T) {
 	dsn := testPostgresDSN(t)
 	store := openTestPostgresStore(t, dsn)
@@ -1066,9 +1043,8 @@ func TestCancelledRequestIsNotAUserinfoFailure(t *testing.T) {
 	}
 }
 
-// A userinfo endpoint that hangs is a failure once the provider's own timeout
-// passes, even when the caller gave up first, so the requests after it are
-// not held up by it again.
+// A hanging userinfo is a failure once the provider's timeout passes, even
+// if the caller gave up first.
 func TestHangingUserinfoIsAFailure(t *testing.T) {
 	var calls atomic.Int32
 	release := make(chan struct{})

@@ -115,9 +115,7 @@ func TestDirectoryDropsOldestSeenGroupsButKeepsDeclared(t *testing.T) {
 	}
 }
 
-// getAuthGroups asks the way Obot does (pkg/gateway/client/group.go): each ID
-// in its own id parameter, and the same IDs joined with commas in ids, for the
-// providers that read only that.
+// getAuthGroups asks as Obot does: each ID in id, and all joined in ids.
 func getAuthGroups(t *testing.T, s *server, ids []string) (int, state.GroupInfoList) {
 	t.Helper()
 	q := url.Values{}
@@ -163,10 +161,7 @@ func TestGetAuthGroupsResolvesIDsInNamespace(t *testing.T) {
 	}
 }
 
-// Obot sends each ID whole in a repeated id parameter, alongside the same IDs
-// joined in ids (pkg/gateway/client/group.go). The id parameters are what
-// count, so DNs come back exactly as asked for even where the comma-joined
-// list could not be split back into them.
+// The id parameters count, so DNs come back exactly as asked.
 func TestGetAuthGroupsReadsRepeatedID(t *testing.T) {
 	s := newTestServer(t, "", time.Minute)
 	ids := []string{

@@ -1,10 +1,7 @@
-// Command mockidp serves the test identity provider on a fixed address so an
-// Obot container can be exercised against it without a real PingFederate.
+// Command mockidp serves the test identity provider for trying the provider
+// in Obot without a real PingFederate:
 //
 //	go run ./hack/mockidp -listen 127.0.0.1:9400
-//
-// Configure the PingFederate auth provider in Obot with the printed issuer,
-// client ID and secret; every login signs in as the configured user.
 package main
 
 import (
@@ -58,10 +55,8 @@ func main() {
 	fmt.Printf("mock identity provider\n  issuer:        %s\n  discovery:     %s%s\n  client id:     %s\n  client secret: %s\n  user:          %s <%s> groups=%s\n",
 		*issuer, *issuer, mockidp.DiscoveryPath, *clientID, *clientSecret, *name, *email, *groups)
 
-	// Listen on IPv4 only. A wildcard "tcp" listener is dual-stack IPv6 in
-	// Go, and WSL2's localhost forwarding, which is how a Docker Desktop
-	// container reaches this process through host.docker.internal, only
-	// relays IPv4 listeners.
+	// IPv4 only: WSL2's localhost forwarding, which Docker Desktop uses for
+	// host.docker.internal, relays only IPv4 listeners.
 	ln, err := net.Listen("tcp4", *listen)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mockidp: %v\n", err)

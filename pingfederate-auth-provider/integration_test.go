@@ -29,9 +29,8 @@ import (
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
 
-// These tests run the whole provider against a mock OpenID Connect identity
-// provider: the browser-side login through oauth2-proxy, then the endpoints
-// Obot calls afterwards with the resulting cookie and access token.
+// These tests run the provider against a mock identity provider: sign-in
+// through oauth2-proxy, then the endpoints Obot calls.
 
 var adaUser = mockidp.User{
 	Subject:           "sub-ada",
@@ -102,9 +101,8 @@ var providerEnv = []string{
 	"OBOT_AUTH_PROVIDER_EMAIL_DOMAINS", "OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION", "OBOT_AUTH_PROVIDER_ENABLE_LOGGING",
 }
 
-// startProvider configures the provider through the environment, exactly as
-// Obot does, and serves it on a loopback port that doubles as the Obot URL so
-// that the identity provider's redirects land on it directly.
+// startProvider configures the provider through the environment, as Obot
+// does, on a loopback port that doubles as the Obot URL.
 func startProvider(t *testing.T, issuer string, env map[string]string) (*testProvider, error) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -186,9 +184,8 @@ func cookieSecret(t *testing.T) []byte {
 	}
 }
 
-// obotRootCallback emulates the Obot server, which registers its own root
-// URL as the OAuth redirect URI and bounces the identity provider's callback
-// to the provider's /oauth2/callback (see pkg/oauth/redirect.go in Obot).
+// obotRootCallback bounces the callback at Obot's root to /oauth2/callback,
+// as Obot does.
 func obotRootCallback(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -645,9 +642,7 @@ func TestCustomScopesAndClaims(t *testing.T) {
 	}
 }
 
-// oauth2-proxy's legacy options skip nonce verification by default, so the
-// provider turns it on explicitly; a nonce in the authorization request shows
-// that it did.
+// oauth2-proxy's legacy defaults skip the nonce; the provider turns it on.
 func TestNonceIsSent(t *testing.T) {
 	idp := startIDP(t, defaultIDPConfig(), false)
 	p := mustStartProvider(t, idp.Issuer(), nil)
@@ -672,9 +667,7 @@ func TestPrivateCA(t *testing.T) {
 	idp := startIDP(t, defaultIDPConfig(), true)
 	caPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: idp.srv.Certificate().Raw}))
 
-	// Without the CA the provider must refuse to start rather than talk to
-	// an identity provider it cannot verify. This case runs first because
-	// oauth2-proxy installs trusted CAs process-wide once configured.
+	// First, because oauth2-proxy installs trusted CAs process-wide.
 	if _, err := startProvider(t, idp.Issuer(), nil); err == nil || !strings.Contains(err.Error(), "certificate") {
 		t.Fatalf("expected a certificate error without the CA, got %v", err)
 	}
@@ -791,9 +784,8 @@ func (p *testProvider) applySetCookies(setCookies []string) {
 	p.jar.SetCookies(u, (&http.Response{Header: header}).Cookies())
 }
 
-// A refresh that changes how many cookies the session is split into must
-// delete the ones it no longer uses: a leftover unsplit cookie would be loaded
-// instead of the new chunks, and a leftover chunk would be joined onto them.
+// A refresh that changes how the session cookie is split must delete the
+// cookies it no longer uses.
 func TestRefreshExpiresSupersededSessionCookies(t *testing.T) {
 	idp := startIDP(t, defaultIDPConfig(), false)
 	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
@@ -856,10 +848,8 @@ func randomGroupName(t *testing.T) string {
 	return hex.EncodeToString(b)
 }
 
-// oauth2-proxy sends the client secret, codes, and refresh tokens through its
-// shared client, which must not follow a redirect: on the same host Go keeps
-// the Authorization header and resends the body even when the redirect drops
-// to plain HTTP.
+// oauth2-proxy's shared client, which carries the client secret and tokens,
+// must not follow redirects.
 func TestOAuthProxyClientDoesNotFollowRedirects(t *testing.T) {
 	idp := startIDP(t, defaultIDPConfig(), false)
 	mustStartProvider(t, idp.Issuer(), nil)
@@ -889,9 +879,7 @@ func TestOAuthProxyClientDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
-// oauth2-proxy is configured from the discovery document the provider fetched
-// and checked, and fetches none of its own, whose endpoints nothing would
-// check. Signing in proves it has the endpoints it needs.
+// oauth2-proxy uses the provider's checked discovery and fetches none itself.
 func TestOAuthProxyUsesCheckedDiscovery(t *testing.T) {
 	idp := startIDP(t, defaultIDPConfig(), false)
 	p := mustStartProvider(t, idp.Issuer(), nil)
@@ -906,11 +894,8 @@ func TestOAuthProxyUsesCheckedDiscovery(t *testing.T) {
 	}
 }
 
-// PingFederate releases email in userinfo only by default, and oauth2-proxy
-// copies it into the session from its own userinfo request without comparing
-// subjects. The provider checks the session against its own userinfo answer,
-// since Obot identifies the user by that email: a contradiction refuses the
-// session (401), and no answer at all fails the request (503).
+// With email only in userinfo, a session whose identity userinfo contradicts
+// is refused (401), and one it cannot confirm fails (503).
 func TestSessionIdentityIsCheckedAgainstUserinfo(t *testing.T) {
 	eve := mockidp.User{Subject: "sub-eve", Email: "eve@example.com", Name: "Eve", PreferredUsername: "eve"}
 	// oauth2-proxy asks userinfo first, during sign-in; the provider asks
@@ -1024,10 +1009,7 @@ func TestRefreshedSessionIdentityIsCheckedAgainstUserinfo(t *testing.T) {
 	}
 }
 
-// Discovery used to tell oauth2-proxy which signature algorithms to accept;
-// the provider passes them on, so a PingFederate that signs ID tokens with
-// ES256 still signs users in. PingFederate also advertises none and HS256,
-// which must not be accepted.
+// The advertised algorithms reach oauth2-proxy, so ES256 ID tokens work.
 func TestSignInWithES256IDTokens(t *testing.T) {
 	cfg := defaultIDPConfig()
 	cfg.SignES256 = true
@@ -1039,11 +1021,9 @@ func TestSignInWithES256IDTokens(t *testing.T) {
 	}
 }
 
-// When the refresh grant returns an ID token, oauth2-proxy rebuilds the
-// session's email and username, reading userinfo again. A refreshing request
-// must give Obot the refreshed, checked identity, not the one from before the
-// refresh, which may never have been checked: here sign-in's userinfo answer
-// was for another subject, and no state request came before the refresh.
+// A refreshing request gives Obot the refreshed, checked identity. Here
+// sign-in's userinfo answer was for someone else, and the first state
+// request refreshes.
 func TestRefreshingRequestGivesTheCheckedIdentity(t *testing.T) {
 	eve := mockidp.User{Subject: "sub-eve", Email: "eve@example.com", PreferredUsername: "eve"}
 	cfg := defaultIDPConfig()
@@ -1071,9 +1051,7 @@ func TestRefreshingRequestGivesTheCheckedIdentity(t *testing.T) {
 	}
 }
 
-// A brief userinfo failure fails only the requests made before the provider
-// asks again, a few seconds later, rather than for long after userinfo is
-// back.
+// A brief userinfo failure fails requests only until the first retry.
 func TestBriefUserinfoFailureRecoversQuickly(t *testing.T) {
 	var down atomic.Bool
 	cfg := defaultIDPConfig()
@@ -1103,14 +1081,10 @@ func TestBriefUserinfoFailureRecoversQuickly(t *testing.T) {
 	}
 }
 
-// A refreshing request asks userinfo about the new access token only: the old
-// one is being replaced, and a second request could take the state request
-// past Obot's deadline while userinfo hangs.
+// A refreshing request asks userinfo about the new token only.
 func TestRefreshingRequestAsksUserinfoOnce(t *testing.T) {
 	idp := startIDP(t, defaultIDPConfig(), false)
-	// With every claim oauth2-proxy reads in the ID token, email_verified
-	// included, oauth2-proxy itself asks userinfo nothing, so only the
-	// provider's requests are counted.
+	// With email_verified in the ID token, oauth2-proxy asks userinfo nothing.
 	user := adaUser
 	verified := true
 	user.EmailVerified = &verified

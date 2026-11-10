@@ -1,8 +1,5 @@
-// Package mockidp is a small OpenID Connect identity provider for tests. It
-// speaks the subset of the protocol PingFederate exposes to Obot: discovery,
-// the authorization code flow (with optional PKCE), token refresh, a JWKS
-// endpoint, and userinfo. Logins are automatic: the authorization endpoint
-// immediately redirects back with a code for the configured user.
+// Package mockidp is an OpenID Connect provider for tests, covering what
+// PingFederate exposes to Obot. Sign-in is automatic, as the configured user.
 package mockidp
 
 import (
@@ -73,10 +70,8 @@ type Config struct {
 	// OmitIDTokenOnRefresh leaves the ID token out of refresh responses,
 	// which is PingFederate's default.
 	OmitIDTokenOnRefresh bool
-	// Userinfo, when set, decides each userinfo answer: given the 1-based
-	// number of the userinfo request and the access token's owner, it returns
-	// the user to answer as, and an HTTP status other than 200 to fail with,
-	// or 0. It stands in for a misbehaving identity provider.
+	// Userinfo, when set, decides each userinfo answer from the request number
+	// (from 1) and the token's owner: whom to answer as, and a failing status or 0.
 	Userinfo func(n int, owner User) (User, int)
 	// OmitUserinfoSubject leaves sub out of userinfo answers.
 	OmitUserinfoSubject bool
@@ -381,9 +376,7 @@ func (i *IDP) token(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		delete(i.refreshTokens, r.PostForm.Get("refresh_token"))
-		// Like PingFederate, look the user up again rather than reissue what
-		// the original grant asserted, so that a change made with SetUser
-		// shows in the refreshed tokens.
+		// Like PingFederate, look the user up again, so SetUser shows in refreshes.
 		if i.user.Subject == user.Subject {
 			user = i.user
 		}
