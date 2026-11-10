@@ -19,9 +19,9 @@ import (
 // Whenever a refresh was due, the session is loaded again afterwards, whether this request refreshed it or another
 // request did while this one waited for oauth2-proxy's session lock, in which case oauth2-proxy sets no cookie.
 //
-// When a refresh was due, it also returns the ID token the session held before, and "" when it was not. oauth2-proxy
-// keeps the old ID token when a refresh response carries none, so a refreshed session whose ID token equals the
-// previous one got no new ID token.
+// When the session was refreshed, it also returns the ID token the session held before, and "" when it was not,
+// including when a refresh was due but oauth2-proxy did not make one. oauth2-proxy keeps the old ID token when a
+// refresh response carries none, so a refreshed session whose ID token equals the previous one got no new ID token.
 //
 // request's cookies are replaced by the refreshed ones. The returned SetCookies also expire any chunk of the old
 // session cookie that the refreshed session no longer uses, so the browser keeps the same session this call loaded.
@@ -50,7 +50,18 @@ func LoadFreshState(proxy *oauth2proxy.OAuthProxy, request *http.Request) (state
 	if err != nil {
 		return state.SerializableState{}, "", err
 	}
+	// A refresh that was due need not have happened: oauth2-proxy refreshes by session age only, and keeps the session
+	// when a refresh fails for a reason it can retry. Each refresh it saves starts the session's age again, which tells
+	// one that happened, whether this request or another made it.
+	if !refreshedSince(session, refreshed) {
+		previousIDToken = ""
+	}
 	return serializableState(refreshed, setCookies), previousIDToken, nil
+}
+
+// refreshedSince reports whether after was saved by a refresh later than before was created.
+func refreshedSince(before, after *sessions.SessionState) bool {
+	return before.CreatedAt != nil && after.CreatedAt != nil && after.CreatedAt.After(*before.CreatedAt)
 }
 
 // loadSession loads the session behind request, with the errors state.GetSerializableState reports, which Obot

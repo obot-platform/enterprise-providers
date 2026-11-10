@@ -39,6 +39,8 @@ type fakePingFederate struct {
 	// omitRefreshIDToken leaves the ID token out of refresh responses, as PingFederate does unless "Return ID Token
 	// on Refresh Grant" is enabled.
 	omitRefreshIDToken bool
+	// failRefresh makes refresh grants fail as an unavailable PingFederate would.
+	failRefresh bool
 	// refreshDelay holds each refresh grant this long before answering.
 	refreshDelay time.Duration
 	// issuedAt is the iat of the next ID token. Each token advances it by a second, so that tokens issued in one
@@ -114,6 +116,10 @@ func (f *fakePingFederate) serve(w http.ResponseWriter, r *http.Request) {
 			f.mu.Unlock()
 			time.Sleep(f.refreshDelay)
 			f.mu.Lock()
+		}
+		if r.Form.Get("grant_type") == "refresh_token" && f.failRefresh {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
 		}
 		token := map[string]any{"access_token": "access-" + time.Now().Format(time.RFC3339Nano), "token_type": "Bearer", "expires_in": 7200, "refresh_token": "refresh"}
 		if r.Form.Get("grant_type") != "refresh_token" || !f.omitRefreshIDToken {
@@ -262,6 +268,12 @@ func userGroupIDs(t *testing.T, s *server, userID string) (int, []string) {
 		t.Fatal(err)
 	}
 	return response.Code, infos.IDs()
+}
+
+// age makes session older than Token Refresh Duration, so that it is due for a refresh, with its access token valid.
+func age(session *sessions.SessionState) {
+	old := time.Now().Add(-2 * time.Hour)
+	session.CreatedAt = &old
 }
 
 func expire(session *sessions.SessionState) {
@@ -589,5 +601,44 @@ func TestStartupIsSafeAcrossReplicas(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Errorf("a replica failed to start: %v", err)
+	}
+}
+
+func TestExpiredAccessTokenOnAYoungSessionKeepsTheSession(t *testing.T) {
+	// The access token expired before Token Refresh Duration passed, as when PingFederate's token lifetime is the
+	// shorter. oauth2-proxy refreshes by session age only, so nothing is refreshed, and the user must stay signed in.
+	f := newFakePingFederate(t)
+	s, provider := testServer(t, f)
+	session := signIn(t, provider)
+	past := time.Now().Add(-time.Minute)
+	session.ExpiresOn = &past
+	header := sessionCookies(t, s, session)
+
+	for i := range 2 {
+		if code := getStateWith(t, s, header); code != http.StatusOK {
+			t.Fatalf("request %d: HTTP %d, want 200", i, code)
+		}
+	}
+}
+
+func TestFailedRefreshKeepsTheSession(t *testing.T) {
+	// PingFederate is briefly unavailable when a session falls due. oauth2-proxy keeps the session so that a later
+	// request can refresh it, and the provider must not end it either.
+	f := newFakePingFederate(t)
+	s, provider := testServer(t, f)
+	session := signIn(t, provider)
+	oldIDToken := session.IDToken
+	age(session)
+	header := sessionCookies(t, s, session)
+
+	f.set(func(f *fakePingFederate) { f.failRefresh = true })
+	if code := getStateWith(t, s, header); code != http.StatusOK {
+		t.Fatalf("get-state while PingFederate is unavailable: HTTP %d, want 200", code)
+	}
+
+	f.set(func(f *fakePingFederate) { f.failRefresh = false })
+	code, ss := getStateWithBody(t, s, header)
+	if code != http.StatusOK || ss.IDToken == oldIDToken {
+		t.Fatalf("get-state once PingFederate is back: HTTP %d, refreshed %v", code, ss.IDToken != oldIDToken)
 	}
 }
