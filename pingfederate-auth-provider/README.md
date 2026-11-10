@@ -32,6 +32,14 @@ Release `sub` and the name attributes in the userinfo response, which PingFedera
 by default (**Include in UserInfo**); Obot reads the display name from userinfo only.
 `email` and `groups` may be released in the ID token, the userinfo response, or both.
 
+Map `email` and `groups` from the same directory lookup (the same attribute source in
+the policy). When PingFederate cannot reach that directory, it still answers, without
+the attributes it would have read there. The provider recognizes a refreshed session
+without an email as such a failure: it keeps the user's recorded groups and ends the
+session, and the user signs in again once the directory is back. If `groups` came from
+a different source than `email`, that source failing would go unnoticed, and users
+would be removed from their groups until their next refresh after it recovers.
+
 In the policy, enable **Return ID Token on Refresh Grant**. It is required: the groups
 in a session come from its ID token, so a session that PingFederate refreshes without
 a new one is ended, and the user signs in again.

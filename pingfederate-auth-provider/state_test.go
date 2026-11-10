@@ -39,6 +39,9 @@ type fakePingFederate struct {
 	// omitRefreshIDToken leaves the ID token out of refresh responses, as PingFederate does unless "Return ID Token
 	// on Refresh Grant" is enabled.
 	omitRefreshIDToken bool
+	// directoryDown makes userinfo answer with the subject alone, as PingFederate does when it cannot reach the
+	// directory it releases attributes from.
+	directoryDown bool
 	// failRefresh makes refresh grants fail as an unavailable PingFederate would.
 	failRefresh bool
 	// refreshDelay holds each refresh grant this long before answering.
@@ -132,6 +135,9 @@ func (f *fakePingFederate) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response = f.userinfo
+		if f.directoryDown {
+			response = map[string]any{"sub": f.userinfo["sub"]}
+		}
 	default:
 		http.NotFound(w, r)
 		return
@@ -640,5 +646,33 @@ func TestFailedRefreshKeepsTheSession(t *testing.T) {
 	code, ss := getStateWithBody(t, s, header)
 	if code != http.StatusOK || ss.IDToken == oldIDToken {
 		t.Fatalf("get-state once PingFederate is back: HTTP %d, refreshed %v", code, ss.IDToken != oldIDToken)
+	}
+}
+
+func TestDirectoryOutageAtRefreshKeepsRecordedGroups(t *testing.T) {
+	// The directory behind PingFederate goes down. PingFederate still answers userinfo, with the subject and nothing
+	// else, so a refresh comes back without an email or groups. The user must not lose their groups.
+	f := newFakePingFederate(t)
+	s, provider := testServer(t, f)
+	session := signIn(t, provider)
+	if code, _ := getStateFor(t, s, session); code != http.StatusOK {
+		t.Fatalf("get-state: HTTP %d", code)
+	}
+	_, before := userGroupIDs(t, s, "alice")
+	if len(before) == 0 {
+		t.Fatal("no groups were recorded at sign-in")
+	}
+
+	f.set(func(f *fakePingFederate) { f.directoryDown = true })
+	age(session)
+	header := sessionCookies(t, s, session)
+	if code := getStateWith(t, s, header); code != http.StatusUnauthorized {
+		t.Fatalf("get-state after a refresh during the outage: HTTP %d, want 401", code)
+	}
+	if _, after := userGroupIDs(t, s, "alice"); !slices.Equal(after, before) {
+		t.Fatalf("recorded groups = %q, want them kept as %q", after, before)
+	}
+	if code := getStateWith(t, s, header); code == http.StatusOK {
+		t.Fatal("the session refreshed during the outage is still accepted")
 	}
 }
