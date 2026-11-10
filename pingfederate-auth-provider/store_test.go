@@ -325,3 +325,52 @@ func TestNormalizeGroupsDropsOverlongValues(t *testing.T) {
 		t.Fatalf("normalizeGroups kept an overlong value")
 	}
 }
+
+func TestStartupNeedsOneConnection(t *testing.T) {
+	// A transaction-pooling proxy with one backend, or a pool that waiting replicas have filled, leaves the replica
+	// holding the startup lock a single connection to work with.
+	dsn := testDSN(t)
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := u.Query().Get("search_path")
+
+	admin, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := schema + "_one"
+	for _, stmt := range []string{
+		"CREATE ROLE " + role + " LOGIN PASSWORD 'one' CONNECTION LIMIT 1",
+		"GRANT USAGE, CREATE ON SCHEMA " + schema + " TO " + role,
+	} {
+		if _, err := admin.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Roles outlive the test's schema, so the role is dropped before the connection used to drop it is closed.
+	t.Cleanup(func() {
+		defer admin.Close()
+		for _, stmt := range []string{"DROP OWNED BY " + role, "DROP ROLE " + role} {
+			if _, err := admin.Exec(stmt); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+
+	u.User = url.UserPassword(role, "one")
+	store, err := prepareDatabase(t.Context(), Options{PostgresConnectionDSN: u.String()}, "pingfederate_")
+	if err != nil {
+		t.Fatalf("startup with one connection: %v", err)
+	}
+	defer store.db.Close()
+
+	// The limit applies to starting. PostgreSQL may still count the closed startup connection for a moment.
+	if _, err := admin.Exec("ALTER ROLE " + role + " CONNECTION LIMIT -1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.setUserGroups(t.Context(), "alice", []string{"a"}, at(1)); err != nil {
+		t.Fatalf("the store does not work after startup: %v", err)
+	}
+}
