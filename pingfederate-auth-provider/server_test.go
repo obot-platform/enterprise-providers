@@ -33,9 +33,10 @@ func newTestServer(t *testing.T, userinfoURL string, cacheTTL time.Duration) *se
 		listenURL:         "http://127.0.0.1:9999",
 		store:             newMemoryGroupStore(),
 		tokenGroups:       expirable.NewLRU[string, userinfoGroups](cacheSize, nil, time.Hour),
-		tokenGroupsFailed: expirable.NewLRU[string, struct{}](cacheSize, nil, tokenGroupsRetry),
+		tokenGroupsFailed: expirable.NewLRU[string, userinfoFailure](cacheSize, nil, 2*tokenGroupsMaxRetry),
 		idTokenClaims:     expirable.NewLRU[string, map[string]any](cacheSize, nil, time.Hour),
 	}
+	s.userinfoTimeout = userinfoTimeout
 	s.directory = newGroupDirectory(cfg.knownGroups, s.store)
 	if cacheTTL > 0 {
 		s.userinfo = expirable.NewLRU[string, userinfoAnswer](cacheSize, nil, cacheTTL)

@@ -978,3 +978,129 @@ func TestPostgresColumnsAreNotNull(t *testing.T) {
 		}
 	}
 }
+
+func TestUserinfoRetryDelay(t *testing.T) {
+	for failures, want := range map[int]time.Duration{
+		1:  5 * time.Second,
+		2:  10 * time.Second,
+		3:  20 * time.Second,
+		4:  40 * time.Second,
+		5:  time.Minute,
+		50: time.Minute,
+	} {
+		if got := userinfoRetryDelay(failures); got != want {
+			t.Errorf("userinfoRetryDelay(%d) = %v, want %v", failures, got, want)
+		}
+	}
+}
+
+// Failures in a row back off, and an answer clears them.
+func TestUserinfoFailuresBackOff(t *testing.T) {
+	var calls atomic.Int32
+	var down atomic.Bool
+	down.Store(true)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		calls.Add(1)
+		if down.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"sub": "sub-1"})
+	}))
+	t.Cleanup(upstream.Close)
+	s := newTestServer(t, upstream.URL, 0)
+
+	for want := 1; want <= 3; want++ {
+		if _, ok, asked := s.currentGroups(t.Context(), "tok", "sub-1"); ok || !asked {
+			t.Fatalf("failure %d: ok=%v asked=%v", want, ok, asked)
+		}
+		failure, _ := s.tokenGroupsFailed.Get("tok")
+		if failure.failures != want {
+			t.Fatalf("failures = %d, want %d", failure.failures, want)
+		}
+		if wait := time.Until(failure.retryAt); wait <= userinfoRetryDelay(want)-time.Second || wait > userinfoRetryDelay(want) {
+			t.Errorf("failure %d: retry in %v, want about %v", want, wait, userinfoRetryDelay(want))
+		}
+		// Within the delay, userinfo is not asked.
+		if _, _, asked := s.currentGroups(t.Context(), "tok", "sub-1"); asked {
+			t.Errorf("failure %d: userinfo asked again within the delay", want)
+		}
+		// Let the delay pass.
+		failure.retryAt = time.Now().Add(-time.Millisecond)
+		s.tokenGroupsFailed.Add("tok", failure)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("userinfo calls = %d, want 3", got)
+	}
+
+	down.Store(false)
+	if _, ok, _ := s.currentGroups(t.Context(), "tok", "sub-1"); !ok {
+		t.Fatal("userinfo answer after recovery not used")
+	}
+	if _, failed := s.tokenGroupsFailed.Get("tok"); failed {
+		t.Error("the failures were not cleared by an answer")
+	}
+}
+
+// A request cancelled while asking userinfo says nothing about userinfo: the
+// provider's request carries on, and its answer is kept for the next request.
+func TestCancelledRequestIsNotAUserinfoFailure(t *testing.T) {
+	var calls atomic.Int32
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1"})
+	s := newTestServer(t, upstream.URL, 0)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	s.currentGroups(ctx, "tok", "sub-1")
+	if _, failed := s.tokenGroupsFailed.Get("tok"); failed {
+		t.Fatal("a cancelled request was remembered as a userinfo failure")
+	}
+	if _, ok, asked := s.currentGroups(t.Context(), "tok", "sub-1"); !ok || asked {
+		t.Errorf("next request: ok=%v asked=%v, want the answer the cancelled request got", ok, asked)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("userinfo calls = %d, want 1", got)
+	}
+}
+
+// A userinfo endpoint that hangs is a failure once the provider's own timeout
+// passes, even when the caller gave up first, so the requests after it are
+// not held up by it again.
+func TestHangingUserinfoIsAFailure(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		calls.Add(1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(release); upstream.Close() })
+	s := newTestServer(t, upstream.URL, 0)
+	s.userinfoTimeout = 300 * time.Millisecond
+
+	// The caller's deadline, like Obot's, passes before the provider's timeout.
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	s.currentGroups(ctx, "tok", "sub-1")
+	if _, failed := s.tokenGroupsFailed.Get("tok"); !failed {
+		t.Fatal("a hanging userinfo was not remembered as a failure")
+	}
+	start := time.Now()
+	if _, _, asked := s.currentGroups(t.Context(), "tok", "sub-1"); asked {
+		t.Error("userinfo asked again within the retry delay")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Errorf("the next request waited %v", elapsed)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("userinfo calls = %d, want 1", got)
+	}
+}

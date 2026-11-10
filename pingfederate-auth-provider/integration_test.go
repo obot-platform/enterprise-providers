@@ -1070,3 +1070,35 @@ func TestRefreshingRequestGivesTheCheckedIdentity(t *testing.T) {
 		t.Errorf("refreshing state = email %q, username %q: the unchecked pre-refresh identity", ss.Email, ss.PreferredUsername)
 	}
 }
+
+// A brief userinfo failure fails only the requests made before the provider
+// asks again, a few seconds later, rather than for long after userinfo is
+// back.
+func TestBriefUserinfoFailureRecoversQuickly(t *testing.T) {
+	var down atomic.Bool
+	cfg := defaultIDPConfig()
+	cfg.EmailInIDToken = false
+	cfg.Userinfo = func(_ int, owner mockidp.User) (mockidp.User, int) {
+		if down.Load() {
+			return owner, http.StatusServiceUnavailable
+		}
+		return owner, 0
+	}
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), nil)
+	p.mustLogin(t) // oauth2-proxy reads the email from userinfo while it is up
+
+	down.Store(true)
+	if _, resp := p.getState(t); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("state while userinfo is down: status = %d, want 503", resp.StatusCode)
+	}
+	down.Store(false)
+	if _, resp := p.getState(t); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("state right after: status = %d, want 503 until the provider asks again", resp.StatusCode)
+	}
+	// Five seconds, not tokenGroupsRetry, so that the test guards the value.
+	time.Sleep(5200 * time.Millisecond)
+	if ss, resp := p.getState(t); resp.StatusCode != http.StatusOK || ss.Email != "ada@example.com" {
+		t.Errorf("state after the retry delay: status = %d, email %q, want 200 and Ada's", resp.StatusCode, ss.Email)
+	}
+}

@@ -184,7 +184,9 @@ none, or carries a different email or `preferred_username`, which also signs
 the user out, within one session refresh duration, if their email changed in
 PingFederate. If
 userinfo cannot answer while the access token is still valid, the request fails
-instead, until userinfo is reachable again. Signed (`application/jwt`) userinfo
+instead, until userinfo is reachable again; after a failure, the provider
+asks userinfo again for that session after five seconds, then waits twice as
+long after each further failure, up to a minute. Signed (`application/jwt`) userinfo
 answers are read like JSON ones.
 
 ## Configuration

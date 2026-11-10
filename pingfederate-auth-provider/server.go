@@ -39,8 +39,19 @@ const (
 	maxBodyBytes = 64 << 10
 
 	// tokenGroupsRetry is how long to wait before asking userinfo again for
-	// an access token after it failed.
-	tokenGroupsRetry = time.Minute
+	// an access token after it failed, doubling with each further failure up
+	// to tokenGroupsMaxRetry. Until then, a session whose identity userinfo
+	// has not yet confirmed fails its requests, so a brief failure costs a few
+	// seconds, while a long outage is not asked about more than once a minute
+	// per token.
+	tokenGroupsRetry    = 5 * time.Second
+	tokenGroupsMaxRetry = time.Minute
+
+	// userinfoTimeout bounds the provider's own userinfo request for a
+	// session's groups and identity. It is shorter than the 15 seconds Obot
+	// gives a state request, so that a userinfo endpoint that hangs is
+	// recorded as failing rather than cut off by Obot's deadline every time.
+	userinfoTimeout = 10 * time.Second
 )
 
 // tokenGroupsTTL is how long userinfo's answer for an access token is reused:
@@ -51,6 +62,24 @@ func tokenGroupsTTL(cfg *settings) time.Duration {
 		return cfg.refreshDuration
 	}
 	return cacheTTL
+}
+
+// userinfoFailure is when userinfo may be asked again about an access token,
+// and how many times in a row it failed.
+type userinfoFailure struct {
+	retryAt  time.Time
+	failures int
+}
+
+// userinfoRetryDelay is how long to wait after the nth failure in a row:
+// tokenGroupsRetry, doubling with each further failure, up to
+// tokenGroupsMaxRetry.
+func userinfoRetryDelay(failures int) time.Duration {
+	delay := tokenGroupsRetry
+	for i := 1; i < failures && delay < tokenGroupsMaxRetry; i++ {
+		delay *= 2
+	}
+	return min(delay, tokenGroupsMaxRetry)
 }
 
 // userinfoGroups is what userinfo reported about an access token's groups.
@@ -89,8 +118,9 @@ type server struct {
 	// asked once per access token for the user's current groups.
 	tokenGroups *expirable.LRU[string, userinfoGroups]
 	// tokenGroupsFailed remembers, briefly, the access tokens for which
-	// userinfo failed, so that a failing endpoint is not asked on every request.
-	tokenGroupsFailed *expirable.LRU[string, struct{}]
+	// userinfo failed, and when to ask again, so that a failing endpoint is
+	// not asked on every request.
+	tokenGroupsFailed *expirable.LRU[string, userinfoFailure]
 	// idTokenClaims maps an access token to the claims of the ID token issued
 	// with it, as a fallback profile when the userinfo endpoint is unavailable.
 	idTokenClaims *expirable.LRU[string, map[string]any]
@@ -99,6 +129,8 @@ type server struct {
 	userinfo *expirable.LRU[string, userinfoAnswer]
 	// directory answers Obot's group search and lookups.
 	directory *groupDirectory
+	// userinfoTimeout bounds currentGroups' userinfo request.
+	userinfoTimeout time.Duration
 }
 
 func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, error) {
@@ -160,9 +192,10 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 		listenURL:         listenURL,
 		store:             store,
 		tokenGroups:       expirable.NewLRU[string, userinfoGroups](cacheSize, nil, tokenGroupsTTL(cfg)),
-		tokenGroupsFailed: expirable.NewLRU[string, struct{}](cacheSize, nil, tokenGroupsRetry),
+		tokenGroupsFailed: expirable.NewLRU[string, userinfoFailure](cacheSize, nil, 2*tokenGroupsMaxRetry),
 		idTokenClaims:     expirable.NewLRU[string, map[string]any](cacheSize, nil, cacheTTL),
 		directory:         newGroupDirectory(cfg.knownGroups, store),
+		userinfoTimeout:   userinfoTimeout,
 	}
 	if cfg.userinfoCacheTTL > 0 {
 		s.userinfo = expirable.NewLRU[string, userinfoAnswer](cacheSize, nil, cfg.userinfoCacheTTL)
@@ -662,15 +695,25 @@ func (s *server) currentGroups(ctx context.Context, token, subject string) (resu
 	if cached, found := s.tokenGroups.Get(token); found {
 		return cached, cached.subject == subject, false
 	}
-	if _, failed := s.tokenGroupsFailed.Get(token); failed {
+	failure, failedBefore := s.tokenGroupsFailed.Get(token)
+	if failedBefore && time.Now().Before(failure.retryAt) {
 		return userinfoGroups{}, false, false
 	}
-	claims, answeredAt, err := s.userinfoClaims(ctx, token)
+	// The request is not stopped when the caller gives up, for example when
+	// a browser aborts it, which says nothing about userinfo; its own timeout
+	// stops it, so that every failure, a hang included, is userinfo's.
+	askCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.userinfoTimeout)
+	defer cancel()
+	claims, answeredAt, err := s.userinfoClaims(askCtx, token)
 	if err != nil {
-		slog.Warn("could not read the user's current groups from userinfo; keeping their recorded groups", "error", err)
-		s.tokenGroupsFailed.Add(token, struct{}{})
+		failure.failures++
+		delay := userinfoRetryDelay(failure.failures)
+		failure.retryAt = time.Now().Add(delay)
+		s.tokenGroupsFailed.Add(token, failure)
+		slog.Warn("could not read the user's current groups from userinfo; keeping their recorded groups", "error", err, "retryIn", delay)
 		return userinfoGroups{}, false, true
 	}
+	s.tokenGroupsFailed.Remove(token)
 	result = userinfoGroups{
 		subject:           oidc.StringClaim(claims, "sub"),
 		email:             sessionClaim(claims, s.cfg.EmailClaim),
