@@ -462,3 +462,41 @@ func TestIDTokenIssuedAt(t *testing.T) {
 		}
 	}
 }
+
+func TestStartupIsSafeAcrossReplicas(t *testing.T) {
+	// Every Obot replica runs its own provider, and they start together against a database without the tables.
+	f := newFakePingFederate(t)
+	dsn := testDSN(t)
+	caFile, err := writeCACertificate(f.caPEM())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Go(func() {
+			opts := testOptions(t, f.issuer(), f.caPEM())
+			opts.PostgresConnectionDSN = dsn
+			proxyOpts, err := buildOAuthProxyOptions(opts, caFile)
+			if err == nil {
+				err = validation.Validate(proxyOpts)
+			}
+			if err == nil {
+				var store *groupStore
+				if store, err = prepareDatabase(t.Context(), opts, proxyOpts.Session.Postgres.TableNamePrefix); err == nil {
+					_ = store.db.Close()
+					_, err = oauth2proxy.NewOAuthProxy(proxyOpts, oauth2proxy.NewValidator(proxyOpts.EmailDomains, proxyOpts.AuthenticatedEmailsFile))
+				}
+			}
+			if err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("a replica failed to start: %v", err)
+	}
+}

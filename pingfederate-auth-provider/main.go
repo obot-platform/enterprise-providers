@@ -89,14 +89,16 @@ func run() error {
 	if err := validation.Validate(oauthProxyOpts); err != nil {
 		return fmt.Errorf("failed to validate options: %w", err)
 	}
+
+	// The database is prepared before the proxy is created, which reaches PingFederate, so that only database work is
+	// serialized across replicas.
+	store, err := prepareDatabase(ctx, opts, oauthProxyOpts.Session.Postgres.TableNamePrefix)
+	if err != nil {
+		return err
+	}
 	oauthProxy, err := oauth2proxy.NewOAuthProxy(oauthProxyOpts, oauth2proxy.NewValidator(oauthProxyOpts.EmailDomains, oauthProxyOpts.AuthenticatedEmailsFile))
 	if err != nil {
 		return fmt.Errorf("failed to create oauth2 proxy: %w", err)
-	}
-
-	store, err := openGroupStore(ctx, opts.PostgresConnectionDSN, opts.PostgresMaxConnections, opts.PostgresMaxIdleConnections, opts.PostgresConnectionLifetimeSeconds)
-	if err != nil {
-		return err
 	}
 
 	srv := &server{

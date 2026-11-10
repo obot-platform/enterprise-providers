@@ -10,6 +10,10 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Registers the "pgx" database/sql driver.
+	sessionstore "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/sessions/postgres"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // The tables share the manifest's postgresTablePrefix, which namespaces them alongside oauth2-proxy's session
@@ -54,7 +58,72 @@ func openGroupStore(ctx context.Context, dsn string, maxOpen, maxIdle, lifetimeS
 	return s, nil
 }
 
+// prepareDatabase creates oauth2-proxy's session tables and this provider's group tables, and opens the group store.
+//
+// Every Obot replica runs its own provider, and they start together, but concurrent CREATE TABLE statements for one
+// table can fail in PostgreSQL. So the tables are created while holding an advisory lock, which serializes the
+// replicas: the first creates them, and the rest find them. The lock is held by a transaction, so that it holds through
+// a transaction-pooling proxy, and it is released when the transaction ends. Everything done under it is bounded by
+// ctx, so a replica stalled on the database cannot keep the others waiting; nothing under it reaches PingFederate.
+// oauth2-proxy migrates its tables again when the proxy is created, which then only reads the catalog.
+func prepareDatabase(ctx context.Context, opts Options, sessionTablePrefix string) (*groupStore, error) {
+	db, err := sql.Open("pgx", opts.PostgresConnectionDSN)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	defer db.Close()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("take the startup lock: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, startupLockKey); err != nil {
+		return nil, fmt.Errorf("take the startup lock: %w", err)
+	}
+
+	if err := migrateSessionTables(ctx, opts.PostgresConnectionDSN, sessionTablePrefix); err != nil {
+		return nil, err
+	}
+	return openGroupStore(ctx, opts.PostgresConnectionDSN, opts.PostgresMaxConnections, opts.PostgresMaxIdleConnections, opts.PostgresConnectionLifetimeSeconds)
+}
+
+// migrateSessionTables creates oauth2-proxy's session and session lock tables as its PostgreSQL session store does.
+func migrateSessionTables(ctx context.Context, dsn, prefix string) error {
+	gdb, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		return fmt.Errorf("open postgres: %w", err)
+	}
+	if sqlDB, err := gdb.DB(); err == nil {
+		defer sqlDB.Close()
+	}
+	gdb = gdb.WithContext(ctx)
+	if err := gdb.Table(prefix + "sessions").AutoMigrate(&sessionstore.Session{}); err != nil {
+		return fmt.Errorf("create session tables: %w", err)
+	}
+	if err := gdb.Table(prefix + "session_locks").AutoMigrate(&sessionstore.SessionLock{}); err != nil {
+		return fmt.Errorf("create session tables: %w", err)
+	}
+	return nil
+}
+
+// startupLockKey names the startup lock. It differs from the key migrate locks, so that migrating while holding it
+// cannot wait on itself.
+const startupLockKey = "pingfederate_startup"
+
+// migrate creates the tables. Every Obot replica runs its own provider, and replicas start together, but concurrent
+// CREATE ... IF NOT EXISTS statements for one table can fail in PostgreSQL. So the statements run in one transaction
+// that first takes an advisory lock, which serializes the replicas: the first creates the tables, the rest find them.
 func (s *groupStore) migrate(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("create group tables: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, usersTable); err != nil {
+		return fmt.Errorf("create group tables: %w", err)
+	}
 	for _, stmt := range []string{
 		`CREATE TABLE IF NOT EXISTS ` + usersTable + ` (
 			user_id TEXT PRIMARY KEY,
@@ -70,9 +139,12 @@ func (s *groupStore) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS ` + membershipsTable + `_group_name ON ` + membershipsTable + ` (group_name)`,
 	} {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("create group tables: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("create group tables: %w", err)
 	}
 	return nil
 }

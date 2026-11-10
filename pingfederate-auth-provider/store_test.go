@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -166,6 +167,28 @@ func TestStoreListsGroupsWithMembers(t *testing.T) {
 	}
 	if !slices.Equal(known, []string{"engineering"}) {
 		t.Fatalf("knownGroups = %q, want [engineering]", known)
+	}
+}
+
+func TestStoreMigrationIsSafeAcrossReplicas(t *testing.T) {
+	// Every Obot replica runs its own provider, and they start together against a database without the tables.
+	dsn := testDSN(t)
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Go(func() {
+			store, err := openGroupStore(t.Context(), dsn, 0, 0, 0)
+			if err != nil {
+				errs <- err
+				return
+			}
+			_ = store.db.Close()
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("a replica failed to start: %v", err)
 	}
 }
 
