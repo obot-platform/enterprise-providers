@@ -81,6 +81,73 @@ func TestStringsClaim(t *testing.T) {
 	}
 }
 
+// Claims are looked up as oauth2-proxy looks them up: by name, else as a
+// dotted path, so the provider reads the claims oauth2-proxy reads.
+func TestNestedClaims(t *testing.T) {
+	claims := map[string]any{
+		"profile": map[string]any{
+			"email":  "ada@example.com",
+			"groups": []any{"cn=admins,ou=groups", "devs"},
+			"team":   "ops, eng",
+		},
+		"a.b": "literal",
+		"a":   map[string]any{"b": "nested"},
+		"c.d": nil,
+		"c":   map[string]any{"d": "nested"},
+		"e":   "not an object",
+	}
+	for _, tc := range []struct {
+		name  string
+		claim string
+		want  string
+	}{
+		{
+			name:  "nested string",
+			claim: "profile.email",
+			want:  "ada@example.com",
+		},
+		{
+			name:  "a literal dotted name wins over the path",
+			claim: "a.b",
+			want:  "literal",
+		},
+		{
+			name:  "a literal dotted name present as null is missing",
+			claim: "c.d",
+			want:  "",
+		},
+		{
+			name:  "path through a non-object",
+			claim: "e.f",
+			want:  "",
+		},
+		{
+			name:  "missing path",
+			claim: "profile.missing",
+			want:  "",
+		},
+		{
+			name:  "empty name",
+			claim: "",
+			want:  "",
+		},
+	} {
+		if got := StringClaim(claims, tc.claim); got != tc.want {
+			t.Errorf("%s: StringClaim(%q) = %q, want %q", tc.name, tc.claim, got, tc.want)
+		}
+	}
+
+	if got := StringsClaim(claims, "profile.groups", ","); strings.Join(got, "|") != "cn=admins,ou=groups|devs" {
+		t.Errorf("nested array: got %v", got)
+	}
+	if got := StringsClaim(claims, "profile.team", ","); strings.Join(got, "|") != "ops|eng" {
+		t.Errorf("nested delimited string: got %v", got)
+	}
+	if got := DisplayName(map[string]any{"profile": map[string]any{"mail": "ada@example.com"}}, "profile.mail"); got != "ada@example.com" {
+		t.Errorf("DisplayName with a nested email claim = %q", got)
+	}
+}
+
 func TestDisplayName(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -284,5 +351,47 @@ func TestUserinfoReadsSignedAnswers(t *testing.T) {
 	}
 	if StringClaim(claims, "sub") != "u1" || StringClaim(claims, "email") != "u1@example.com" {
 		t.Errorf("claims = %v", claims)
+	}
+}
+
+// A userinfo 401 or 403 is the token's rejection; other failures are not.
+func TestUserinfoRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		rejected bool
+	}{
+		{
+			name:     "unauthorized",
+			status:   http.StatusUnauthorized,
+			rejected: true,
+		},
+		{
+			name:     "forbidden",
+			status:   http.StatusForbidden,
+			rejected: true,
+		},
+		{
+			name:     "unavailable",
+			status:   http.StatusServiceUnavailable,
+			rejected: false,
+		},
+		{
+			name:     "redirect",
+			status:   http.StatusFound,
+			rejected: false,
+		},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+		}))
+		_, err := Userinfo(t.Context(), srv.Client(), srv.URL, "Bearer tok")
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%s: no error", tc.name)
+		}
+		if errors.Is(err, ErrTokenRejected) != tc.rejected {
+			t.Errorf("%s: rejected = %v, want %v (%v)", tc.name, !tc.rejected, tc.rejected, err)
+		}
 	}
 }

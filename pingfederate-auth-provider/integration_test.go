@@ -1105,3 +1105,181 @@ func TestRefreshingRequestAsksUserinfoOnce(t *testing.T) {
 		t.Errorf("userinfo requests on the refreshing request = %d, want 1, for the new token", got)
 	}
 }
+
+// Dotted claim names are read as nested paths, as oauth2-proxy reads them, so
+// the groups userinfo releases under profile.groups are recorded.
+func TestNestedClaims(t *testing.T) {
+	cfg := defaultIDPConfig()
+	cfg.GroupsClaimName = "profile.groups"
+	cfg.EmailClaimName = "profile.email"
+	cfg.EmailInIDToken = false
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{
+		"OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM": "profile.groups",
+		"OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM":  "profile.email",
+	})
+
+	p.mustLogin(t)
+	ss := p.mustGetState(t)
+	if ss.Email != "ada@example.com" {
+		t.Errorf("email = %q, want Ada's from profile.email", ss.Email)
+	}
+	if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || groupNames(groups) != "pingfederate/admins=admins,pingfederate/devs=devs" {
+		t.Errorf("recorded groups = %d %q, want admins and devs from profile.groups", status, groupNames(groups))
+	}
+	status, profile := p.userInfo(t, ss.AccessToken)
+	if status != http.StatusOK || profile["email"] != "ada@example.com" {
+		t.Errorf("user info = %d %v, want Ada's email from profile.email", status, profile)
+	}
+	// Obot's own userinfo request records the groups too.
+	if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || groupNames(groups) != "pingfederate/admins=admins,pingfederate/devs=devs" {
+		t.Errorf("groups after user info = %d %q", status, groupNames(groups))
+	}
+}
+
+// With the email in the ID token and no ID token on refresh, the session
+// keeps the sign-in email; userinfo's answer for the refreshed token reveals
+// a change, and the session is refused so the user signs in again.
+func TestEmailChangeIsNoticedWhenTheIDTokenHasTheEmail(t *testing.T) {
+	cfg := defaultIDPConfig()
+	cfg.EmailInIDToken = true
+	cfg.OmitIDTokenOnRefresh = true
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+	p.mustLogin(t)
+	if ss := p.mustGetState(t); ss.Email != "ada@example.com" {
+		t.Fatalf("email = %q", ss.Email)
+	}
+
+	changed := adaUser
+	changed.Email = "ada.lovelace@example.com"
+	idp.SetUser(changed)
+	time.Sleep(2100 * time.Millisecond)
+	if ss, resp := p.getState(t); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("state after a refresh once the email changed: status = %d, email %q, want 401", resp.StatusCode, ss.Email)
+	}
+	if idp.Counts().Refresh != 1 {
+		t.Errorf("refresh token grants = %d, want 1", idp.Counts().Refresh)
+	}
+}
+
+// A refresh while userinfo is down keeps a confirmed session: the refreshed
+// cookies, with the rotated refresh token, reach the browser, and the session
+// keeps working instead of failing its next refresh with the spent token.
+func TestRefreshWhileUserinfoIsDownKeepsTheSession(t *testing.T) {
+	var down atomic.Bool
+	cfg := defaultIDPConfig()
+	cfg.EmailInIDToken = false
+	cfg.OmitIDTokenOnRefresh = true
+	cfg.Userinfo = func(_ int, owner mockidp.User) (mockidp.User, int) {
+		if down.Load() {
+			return owner, http.StatusServiceUnavailable
+		}
+		return owner, 0
+	}
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+	p.mustLogin(t)
+	p.mustGetState(t) // userinfo confirms the session
+
+	down.Store(true)
+	time.Sleep(2100 * time.Millisecond)
+	ss, resp := p.getState(t)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("refreshing state while userinfo is down: status = %d, want 200", resp.StatusCode)
+	}
+	if len(ss.SetCookies) == 0 {
+		t.Fatal("expected the state request to refresh the session")
+	}
+	if ss.User != "sub-ada" || ss.Email != "ada@example.com" {
+		t.Errorf("refreshed state = user %q, email %q, want Ada's", ss.User, ss.Email)
+	}
+	p.applySetCookies(ss.SetCookies)
+
+	// The refreshed token is not asked about again until the retry delay.
+	if ss, resp := p.getState(t); resp.StatusCode != http.StatusOK || len(ss.SetCookies) != 0 {
+		t.Errorf("state with the refreshed cookies while userinfo is down: status = %d, setCookies %v, want 200 and none", resp.StatusCode, ss.SetCookies)
+	}
+
+	// The next refresh uses the rotated refresh token, which the IdP accepts.
+	down.Store(false)
+	time.Sleep(2100 * time.Millisecond)
+	ss, resp = p.getState(t)
+	if resp.StatusCode != http.StatusOK || len(ss.SetCookies) == 0 {
+		t.Fatalf("next refresh: status = %d, setCookies %v, want 200 and a refresh", resp.StatusCode, ss.SetCookies)
+	}
+	if idp.Counts().Refresh != 2 {
+		t.Errorf("refresh token grants = %d, want 2", idp.Counts().Refresh)
+	}
+}
+
+// When its OIDC policy's attribute source fails, PingFederate answers
+// userinfo with only sub. That answer is a failure, not the user's identity:
+// a confirmed session keeps working through a refresh, and the user's
+// recorded groups are kept.
+func TestIncompleteUserinfoIsAFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		emailInIDToken bool
+	}{
+		{
+			name:           "email taken from userinfo",
+			emailInIDToken: false,
+		},
+		{
+			name:           "email in the ID token",
+			emailInIDToken: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var degraded atomic.Bool
+			cfg := defaultIDPConfig()
+			cfg.GroupsInIDToken = false
+			cfg.EmailInIDToken = tc.emailInIDToken
+			cfg.OmitIDTokenOnRefresh = true
+			cfg.Userinfo = func(_ int, owner mockidp.User) (mockidp.User, int) {
+				if degraded.Load() {
+					return mockidp.User{Subject: owner.Subject}, 0
+				}
+				return owner, 0
+			}
+			idp := startIDP(t, cfg, false)
+			p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+			// Two of these 1s refresh periods are shorter than the test.
+			p.srv.incompleteAnswerTolerance = time.Minute
+			p.mustLogin(t)
+			p.mustGetState(t)
+			if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || len(groups) != 2 {
+				t.Fatalf("groups before = %d %q", status, groupNames(groups))
+			}
+
+			degraded.Store(true)
+			time.Sleep(2100 * time.Millisecond)
+			ss, resp := p.getState(t)
+			if resp.StatusCode != http.StatusOK || len(ss.SetCookies) == 0 {
+				t.Fatalf("refreshing state with an incomplete userinfo: status = %d, setCookies %v, want 200 and a refresh", resp.StatusCode, ss.SetCookies)
+			}
+			if ss.Email != "ada@example.com" {
+				t.Errorf("email = %q, want Ada's", ss.Email)
+			}
+			if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || len(groups) != 2 {
+				t.Errorf("groups after an incomplete answer = %d %q, want the recorded two", status, groupNames(groups))
+			}
+			// Obot's own userinfo request does not empty them either.
+			if status, profile := p.userInfo(t, ss.AccessToken); status != http.StatusOK || profile["id"] != "sub-ada" {
+				t.Errorf("user info = %d %v", status, profile)
+			}
+			if status, groups := p.groups(t, "sub-ada"); status != http.StatusOK || len(groups) != 2 {
+				t.Errorf("groups after user info = %d %q, want the recorded two", status, groupNames(groups))
+			}
+
+			// Complete answers are read again once PingFederate recovers.
+			degraded.Store(false)
+			p.applySetCookies(ss.SetCookies)
+			time.Sleep(5200 * time.Millisecond)
+			if ss, resp := p.getState(t); resp.StatusCode != http.StatusOK || ss.Email != "ada@example.com" {
+				t.Errorf("state after recovery = %d %q", resp.StatusCode, ss.Email)
+			}
+		})
+	}
+}

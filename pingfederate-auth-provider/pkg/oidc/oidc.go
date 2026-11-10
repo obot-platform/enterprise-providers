@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -117,6 +118,10 @@ func Discover(ctx context.Context, client *http.Client, issuer string) (*Discove
 	return &d, nil
 }
 
+// ErrTokenRejected is userinfo refusing the access token (401 or 403), as
+// for a revoked token, rather than failing to answer.
+var ErrTokenRejected = errors.New("userinfo rejected the access token")
+
 // Userinfo returns the userinfo claims for a bearer token. A signed answer
 // (application/jwt) is read without checking the signature, as oauth2-proxy
 // does: it arrives over the same verified TLS as JSON.
@@ -144,7 +149,11 @@ func Userinfo(ctx context.Context, client *http.Client, userinfoURL, authorizati
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("userinfo returned %d%s: %s", resp.StatusCode, redirectTarget(resp), strings.TrimSpace(string(body)))
+		err := fmt.Errorf("userinfo returned %d%s: %s", resp.StatusCode, redirectTarget(resp), strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			err = fmt.Errorf("%w: %w", ErrTokenRejected, err)
+		}
+		return nil, err
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
@@ -210,16 +219,37 @@ func TimeClaim(claims map[string]any, name string) time.Time {
 	return time.Time{}
 }
 
+// ClaimValue looks a claim up as oauth2-proxy does: by name, else as a dotted
+// path (profile.groups). Null is missing.
+func ClaimValue(claims map[string]any, name string) any {
+	if name == "" {
+		return nil
+	}
+	if value, ok := claims[name]; ok {
+		// Present, even as null: oauth2-proxy then does not try the path.
+		return value
+	}
+	var current any = claims
+	for _, part := range strings.Split(name, ".") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = object[part]
+	}
+	return current
+}
+
 // StringClaim returns claim as a string, or "" when absent or not a string.
 func StringClaim(claims map[string]any, name string) string {
-	s, _ := claims[name].(string)
+	s, _ := ClaimValue(claims, name).(string)
 	return s
 }
 
 // StringsClaim returns a multi-valued claim. An array's elements are never
 // split, so an LDAP DN stays whole; a string is split on delimiter if set.
 func StringsClaim(claims map[string]any, name, delimiter string) []string {
-	switch v := claims[name].(type) {
+	switch v := ClaimValue(claims, name).(type) {
 	case []any:
 		out := make([]string, 0, len(v))
 		for _, item := range v {

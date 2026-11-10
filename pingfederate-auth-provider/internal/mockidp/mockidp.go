@@ -59,8 +59,10 @@ type Config struct {
 	// string instead of a JSON array, a common PingFederate attribute mapping.
 	GroupsAsDelimitedString bool
 	// GroupsClaimName is the name of the groups claim; it defaults to "groups".
+	// A dotted name (profile.groups) is emitted as nested objects.
 	GroupsClaimName string
 	// EmailClaimName is the name of the email claim; it defaults to "email".
+	// A dotted name is emitted as nested objects.
 	EmailClaimName string
 	// EmailInIDToken when false leaves email out of the ID token so that the
 	// relying party has to look it up at the userinfo endpoint.
@@ -464,7 +466,7 @@ func (i *IDP) userinfo(w http.ResponseWriter, r *http.Request) {
 
 func (i *IDP) addProfileClaims(claims map[string]any, user User, includeEmail, includeGroups bool) {
 	if includeEmail && user.Email != "" {
-		claims[i.cfg.EmailClaimName] = user.Email
+		setClaim(claims, i.cfg.EmailClaimName, user.Email)
 		if user.EmailVerified != nil {
 			claims["email_verified"] = *user.EmailVerified
 		}
@@ -482,11 +484,25 @@ func (i *IDP) addProfileClaims(claims map[string]any, user User, includeEmail, i
 	}
 	if includeGroups && len(user.Groups) > 0 {
 		if i.cfg.GroupsAsDelimitedString {
-			claims[i.cfg.GroupsClaimName] = strings.Join(user.Groups, ",")
+			setClaim(claims, i.cfg.GroupsClaimName, strings.Join(user.Groups, ","))
 		} else {
-			claims[i.cfg.GroupsClaimName] = user.Groups
+			setClaim(claims, i.cfg.GroupsClaimName, user.Groups)
 		}
 	}
+}
+
+// setClaim sets a claim, nesting objects for a dotted name.
+func setClaim(claims map[string]any, name string, value any) {
+	parts := strings.Split(name, ".")
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := claims[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			claims[part] = next
+		}
+		claims = next
+	}
+	claims[parts[len(parts)-1]] = value
 }
 
 func (i *IDP) jwks(w http.ResponseWriter, _ *http.Request) {

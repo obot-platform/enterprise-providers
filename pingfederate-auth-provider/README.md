@@ -71,9 +71,20 @@ restart.
 ## When PingFederate is unavailable
 
 Obot confirms each user's identity with PingFederate's userinfo endpoint. While
-it is unreachable, users cannot sign in, and requests right after a session
-refresh fail, until it is back. Other requests from signed-in users keep
-working.
+it is unreachable, users cannot sign in. A signed-in user keeps working if
+userinfo confirmed their identity in the last 24 hours on the replica that
+serves them, through session refreshes too when refreshes return no ID token
+(PingFederate's default). Other requests fail until it is back.
+
+When the OIDC policy's attribute source (for example PingDirectory) fails,
+PingFederate's userinfo still answers, with only `sub`. Obot does not read an
+answer with none of the email and username userinfo releases as the user's
+claims: it keeps users' recorded groups rather than emptying them. Because
+such an answer also comes for a user removed from the directory, signed-in
+users keep working through it for up to two **Token Refresh Durations** after
+userinfo last confirmed them (24 hours when refreshes are turned off), not 24
+hours. Obot records groups only from userinfo answers that carry the email or
+`preferred_username`, so release one of them in userinfo too.
 
 ## Settings
 
@@ -94,6 +105,9 @@ working.
 | Userinfo Cache Duration | `OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL` | `5m` |
 | Token Refresh Duration | `OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION` | `1h` |
 | Enable Logging | `OBOT_AUTH_PROVIDER_ENABLE_LOGGING` | `false` |
+
+A claim setting can name a nested claim as a dotted path, such as
+`profile.groups`. A claim whose own name contains the dots wins.
 
 ## Development
 

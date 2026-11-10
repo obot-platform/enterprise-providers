@@ -44,7 +44,7 @@ func recordedGroups(t *testing.T, s *server, id string) string {
 // ID token is not reissued on refresh.
 func TestRecordSessionTakesCurrentGroupsFromUserinfo(t *testing.T) {
 	var calls atomic.Int32
-	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "groups": []any{"current"}})
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com", "groups": []any{"current"}})
 	s := newTestServer(t, upstream.URL, time.Minute)
 
 	for range 3 {
@@ -66,7 +66,7 @@ func TestRecordSessionTakesCurrentGroupsFromUserinfo(t *testing.T) {
 // An empty groups claim in userinfo means the user has no groups now.
 func TestRecordSessionTakesEmptyUserinfoGroups(t *testing.T) {
 	var calls atomic.Int32
-	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "groups": []any{}})
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com", "groups": []any{}})
 	s := newTestServer(t, upstream.URL, time.Minute)
 
 	ss := state.SerializableState{AccessToken: "tok", IDToken: idTokenWithGroups("stale"), Groups: []string{"stale"}}
@@ -401,7 +401,7 @@ func TestUserinfoFailureKeepsRecordedGroups(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"sub": "sub-1", "groups": []any{"devs"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"sub": "sub-1", "email": "ada@example.com", "groups": []any{"devs"}})
 	}))
 	t.Cleanup(upstream.Close)
 	s := newTestServer(t, upstream.URL, time.Minute)
@@ -548,7 +548,7 @@ func TestPostgresGroupStoreConcurrentStart(t *testing.T) {
 // cannot keep groups the user lost.
 func TestRefreshingOrExpiredSessionRecordsNothing(t *testing.T) {
 	var calls atomic.Int32
-	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "groups": []any{"admins"}})
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com", "groups": []any{"admins"}})
 	s := newTestServer(t, upstream.URL, time.Minute)
 
 	ss := state.SerializableState{AccessToken: "tok", IDToken: idTokenWithGroups("admins"), SetCookies: []string{"obot_access_token=refreshed"}}
@@ -991,7 +991,7 @@ func TestUserinfoFailuresBackOff(t *testing.T) {
 	s := newTestServer(t, upstream.URL, 0)
 
 	for want := 1; want <= 3; want++ {
-		if _, ok, asked := s.currentGroups(t.Context(), "tok", "sub-1"); ok || !asked {
+		if _, ok, asked := s.currentGroups(t.Context(), "tok", "sub-1", releasedClaims{}); ok || !asked {
 			t.Fatalf("failure %d: ok=%v asked=%v", want, ok, asked)
 		}
 		failure, _ := s.tokenGroupsFailed.Get("tok")
@@ -1002,7 +1002,7 @@ func TestUserinfoFailuresBackOff(t *testing.T) {
 			t.Errorf("failure %d: retry in %v, want about %v", want, wait, userinfoRetryDelay(want))
 		}
 		// Within the delay, userinfo is not asked.
-		if _, _, asked := s.currentGroups(t.Context(), "tok", "sub-1"); asked {
+		if _, _, asked := s.currentGroups(t.Context(), "tok", "sub-1", releasedClaims{}); asked {
 			t.Errorf("failure %d: userinfo asked again within the delay", want)
 		}
 		// Let the delay pass.
@@ -1014,7 +1014,7 @@ func TestUserinfoFailuresBackOff(t *testing.T) {
 	}
 
 	down.Store(false)
-	if _, ok, _ := s.currentGroups(t.Context(), "tok", "sub-1"); !ok {
+	if _, ok, _ := s.currentGroups(t.Context(), "tok", "sub-1", releasedClaims{}); !ok {
 		t.Fatal("userinfo answer after recovery not used")
 	}
 	if _, failed := s.tokenGroupsFailed.Get("tok"); failed {
@@ -1031,11 +1031,11 @@ func TestCancelledRequestIsNotAUserinfoFailure(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	s.currentGroups(ctx, "tok", "sub-1")
+	s.currentGroups(ctx, "tok", "sub-1", releasedClaims{})
 	if _, failed := s.tokenGroupsFailed.Get("tok"); failed {
 		t.Fatal("a cancelled request was remembered as a userinfo failure")
 	}
-	if _, ok, asked := s.currentGroups(t.Context(), "tok", "sub-1"); !ok || asked {
+	if _, ok, asked := s.currentGroups(t.Context(), "tok", "sub-1", releasedClaims{}); !ok || asked {
 		t.Errorf("next request: ok=%v asked=%v, want the answer the cancelled request got", ok, asked)
 	}
 	if got := calls.Load(); got != 1 {
@@ -1065,12 +1065,12 @@ func TestHangingUserinfoIsAFailure(t *testing.T) {
 	// The caller's deadline, like Obot's, passes before the provider's timeout.
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	s.currentGroups(ctx, "tok", "sub-1")
+	s.currentGroups(ctx, "tok", "sub-1", releasedClaims{})
 	if _, failed := s.tokenGroupsFailed.Get("tok"); !failed {
 		t.Fatal("a hanging userinfo was not remembered as a failure")
 	}
 	start := time.Now()
-	if _, _, asked := s.currentGroups(t.Context(), "tok", "sub-1"); asked {
+	if _, _, asked := s.currentGroups(t.Context(), "tok", "sub-1", releasedClaims{}); asked {
 		t.Error("userinfo asked again within the retry delay")
 	}
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {

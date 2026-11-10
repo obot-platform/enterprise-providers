@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,6 +45,10 @@ const (
 	// userinfoTimeout is under Obot's 15-second state deadline, so a hanging
 	// userinfo is recorded as a failure instead of cut off by Obot each time.
 	userinfoTimeout = 10 * time.Second
+
+	// confirmationMaxAge bounds how long a userinfo confirmation of a session's
+	// identity lets it through userinfo failures, refreshes included.
+	confirmationMaxAge = 24 * time.Hour
 )
 
 // tokenGroupsTTL reuses a token's userinfo answer until the session is due for
@@ -101,6 +106,15 @@ type server struct {
 	tokenGroups *expirable.LRU[string, userinfoGroups]
 	// tokenGroupsFailed holds tokens whose userinfo request failed recently.
 	tokenGroupsFailed *expirable.LRU[string, userinfoFailure]
+	// confirmedIdentities holds the identity userinfo confirmed per access
+	// token, which outlives tokenGroups so it is still there at the refresh.
+	confirmedIdentities *expirable.LRU[string, identityConfirmation]
+	// unusableAnswers holds why userinfo's last answer for a token could not
+	// be used: it refused the token, or answered incompletely.
+	unusableAnswers *expirable.LRU[string, unusableAnswer]
+	// userinfoReleases holds the identity claims userinfo released in its
+	// last complete answer per subject, to tell an incomplete answer.
+	userinfoReleases *expirable.LRU[string, releasedClaims]
 	// idTokenClaims holds each access token's ID token claims, a fallback
 	// profile when userinfo fails.
 	idTokenClaims *expirable.LRU[string, map[string]any]
@@ -111,6 +125,11 @@ type server struct {
 	directory *groupDirectory
 	// userinfoTimeout bounds currentGroups' userinfo request.
 	userinfoTimeout time.Duration
+	// incompleteAnswerTolerance is how long after userinfo last confirmed a
+	// session an incomplete answer still lets it through: two refresh
+	// periods, so a session survives a refresh while the attribute source is
+	// down.
+	incompleteAnswerTolerance time.Duration
 }
 
 func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, error) {
@@ -175,6 +194,12 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 		idTokenClaims:     expirable.NewLRU[string, map[string]any](cacheSize, nil, cacheTTL),
 		directory:         newGroupDirectory(cfg.knownGroups, store),
 		userinfoTimeout:   userinfoTimeout,
+
+		incompleteAnswerTolerance: min(2*tokenGroupsTTL(cfg), confirmationMaxAge),
+
+		confirmedIdentities: expirable.NewLRU[string, identityConfirmation](cacheSize, nil, confirmationMaxAge),
+		unusableAnswers:     expirable.NewLRU[string, unusableAnswer](cacheSize, nil, confirmationMaxAge),
+		userinfoReleases:    expirable.NewLRU[string, releasedClaims](cacheSize, nil, confirmationMaxAge),
 	}
 	if cfg.userinfoCacheTTL > 0 {
 		s.userinfo = expirable.NewLRU[string, userinfoAnswer](cacheSize, nil, cfg.userinfoCacheTTL)
@@ -329,8 +354,9 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 	}
 	checked := ss
 	var (
-		subject  string
-		idClaims map[string]any
+		subject       string
+		idClaims      map[string]any
+		previousToken string
 	)
 	if !loaded {
 		subject, idClaims = s.recordSession(r.Context(), &ss)
@@ -342,6 +368,7 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 		if loaded {
 			subject, idClaims = s.recordSession(r.Context(), &refreshed)
 			checked = refreshed
+			previousToken = ss.AccessToken
 			ss.User = refreshed.User
 			ss.Email = refreshed.Email
 			ss.PreferredUsername = refreshed.PreferredUsername
@@ -352,7 +379,7 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 		}
 		ss.SetCookies = append(ss.SetCookies, expireSupersededCookies(req, ss.SetCookies)...)
 	}
-	switch s.checkUserinfoClaims(checked, subject, idClaims) {
+	switch s.checkUserinfoClaims(checked, subject, idClaims, previousToken) {
 	case userinfoContradicts:
 		slog.Warn("userinfo contradicts the session: it answered for another subject, or for none, or with other identity claims; refusing the session")
 		http.Error(w, "the session's identity does not match userinfo", http.StatusUnauthorized)
@@ -479,8 +506,10 @@ const (
 // PingFederate's email) from userinfo without comparing subjects, and Obot
 // identifies users by email. Comparing the claims too catches two userinfo
 // requests answered differently. With no answer, a session fails while its
-// token is valid; an expired token is checked after the next refresh.
-func (s *server) checkUserinfoClaims(ss state.SerializableState, subject string, idClaims map[string]any) userinfoCheck {
+// token is valid, unless userinfo confirmed the same identity for the token or
+// for previousToken, the one a refresh replaced; an expired token is checked
+// after the next refresh.
+func (s *server) checkUserinfoClaims(ss state.SerializableState, subject string, idClaims map[string]any, previousToken string) userinfoCheck {
 	if s.userinfoURL == "" || ss.AccessToken == "" || subject == "" {
 		// Without a userinfo endpoint, oauth2-proxy reads no claims from it.
 		return userinfoConsistent
@@ -490,19 +519,58 @@ func (s *server) checkUserinfoClaims(ss state.SerializableState, subject string,
 		return userinfoContradicts
 	}
 
+	// A refresh without an ID token keeps the old token's email, so an email
+	// userinfo releases is compared even when the ID token has one, ignoring
+	// case in case the two come from differently cased attributes.
+	if answered && ss.Email != "" && answer.email != "" && !strings.EqualFold(answer.email, ss.Email) {
+		slog.Warn("the session's email is not the one userinfo releases now; if the user's email did not change, release the same email attribute in the ID token and in userinfo")
+		return userinfoContradicts
+	}
+
 	type claim struct{ session, answer string }
 	var fromUserinfo []claim
-	if ss.Email != "" && claimValue(idClaims, s.cfg.EmailClaim) == nil {
+	taken := s.takenFromUserinfo(ss, idClaims)
+	if taken.email {
 		fromUserinfo = append(fromUserinfo, claim{ss.Email, answer.email})
 	}
-	if ss.PreferredUsername != "" && claimValue(idClaims, "preferred_username") == nil {
+	if taken.preferredUsername {
 		fromUserinfo = append(fromUserinfo, claim{ss.PreferredUsername, answer.preferredUsername})
 	}
 	if len(fromUserinfo) == 0 {
 		return userinfoConsistent
 	}
+	identity := sessionIdentity{subject: subject, email: ss.Email, preferredUsername: ss.PreferredUsername}
 	if !answered {
 		if ss.ExpiresOn != nil && ss.ExpiresOn.Before(time.Now()) {
+			return userinfoConsistent
+		}
+		maxAge := confirmationMaxAge
+		switch unusable, _ := s.unusableAnswers.Get(ss.AccessToken); unusable {
+		case tokenRejected:
+			// Neither its own nor an inherited confirmation passes a token
+			// userinfo refused.
+			return userinfoUnconfirmed
+		case answerIncomplete:
+			// Such an answer can also mean the user was removed from the
+			// directory, so it is tolerated for less long than an outage.
+			maxAge = s.incompleteAnswerTolerance
+		}
+		if previous, _ := s.unusableAnswers.Get(previousToken); previous == answerIncomplete {
+			// So is a session whose previous token got one.
+			maxAge = min(maxAge, s.incompleteAnswerTolerance)
+		}
+		if _, ok := s.confirmation(ss.AccessToken, identity, maxAge); ok {
+			return userinfoConsistent
+		}
+		// A refresh that kept a confirmed identity is not failed, so its
+		// cookies, which may hold a rotated refresh token, reach the browser.
+		// The new token inherits the confirmation with its original time.
+		if c, ok := s.confirmation(previousToken, identity, maxAge); ok {
+			s.confirmedIdentities.Add(ss.AccessToken, c)
+			if maxAge < confirmationMaxAge && !s.unusableAnswers.Contains(ss.AccessToken) {
+				// The new token keeps the shorter tolerance.
+				s.unusableAnswers.Add(ss.AccessToken, answerIncomplete)
+			}
 			return userinfoConsistent
 		}
 		return userinfoUnconfirmed
@@ -512,33 +580,48 @@ func (s *server) checkUserinfoClaims(ss state.SerializableState, subject string,
 			return userinfoContradicts
 		}
 	}
+	s.confirmedIdentities.Add(ss.AccessToken, identityConfirmation{identity: identity, at: answer.observedAt})
 	return userinfoConsistent
 }
 
-// claimValue looks a claim up as oauth2-proxy does: by name, else as a
-// dotted path. Null is missing.
-func claimValue(claims map[string]any, name string) any {
-	if name == "" {
-		return nil
-	}
-	if value, ok := claims[name]; ok {
-		// Present, even as null: oauth2-proxy then does not try the path.
-		return value
-	}
-	var current any = claims
-	for _, part := range strings.Split(name, ".") {
-		object, ok := current.(map[string]any)
-		if !ok {
-			return nil
-		}
-		current = object[part]
-	}
-	return current
+// sessionIdentity is a session's identity claims.
+type sessionIdentity struct {
+	subject, email, preferredUsername string
 }
+
+// identityConfirmation is an identity userinfo confirmed, and when.
+type identityConfirmation struct {
+	identity sessionIdentity
+	at       time.Time
+}
+
+// confirmation returns userinfo's confirmation of identity for token, if it
+// answered within maxAge.
+func (s *server) confirmation(token string, identity sessionIdentity, maxAge time.Duration) (identityConfirmation, bool) {
+	if token == "" {
+		return identityConfirmation{}, false
+	}
+	c, ok := s.confirmedIdentities.Get(token)
+	if !ok || c.identity != identity || time.Since(c.at) > maxAge {
+		return identityConfirmation{}, false
+	}
+	return c, true
+}
+
+// unusableAnswer is why userinfo's answer for a token could not be used.
+type unusableAnswer int
+
+const (
+	// tokenRejected is userinfo refusing the token (401 or 403).
+	tokenRejected unusableAnswer = iota + 1
+	// answerIncomplete is an answer without the identity claims userinfo
+	// releases (see checkComplete).
+	answerIncomplete
+)
 
 // sessionClaim returns a claim as oauth2-proxy stores it in a session.
 func sessionClaim(claims map[string]any, name string) string {
-	value := claimValue(claims, name)
+	value := oidc.ClaimValue(claims, name)
 	if value == nil {
 		return ""
 	}
@@ -570,7 +653,7 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 		subject = ss.User
 	}
 
-	groups, observedAt, record := s.sessionGroups(ctx, ss.AccessToken, subject, claims)
+	groups, observedAt, record := s.sessionGroups(ctx, ss.AccessToken, subject, claims, s.takenFromUserinfo(*ss, claims))
 	ss.GroupInfos = groupInfos(groups)
 	// A refreshing, expired or unreadable session says nothing current.
 	if len(ss.SetCookies) > 0 || (ss.ExpiresOn != nil && ss.ExpiresOn.Before(time.Now())) || !claimsReadable {
@@ -589,7 +672,7 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 // whether to record them. Groups come from userinfo when there is an endpoint:
 // PingFederate does not reissue the ID token on refresh by default. A missing
 // claim means no groups; a failure records nothing.
-func (s *server) sessionGroups(ctx context.Context, token, subject string, idTokenClaims map[string]any) ([]string, time.Time, bool) {
+func (s *server) sessionGroups(ctx context.Context, token, subject string, idTokenClaims map[string]any, want releasedClaims) ([]string, time.Time, bool) {
 	tokenGroups := oidc.StringsClaim(idTokenClaims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
 	if subject == "" {
 		return tokenGroups, time.Time{}, false
@@ -598,9 +681,19 @@ func (s *server) sessionGroups(ctx context.Context, token, subject string, idTok
 		issued := oidc.TimeClaim(idTokenClaims, "iat")
 		return tokenGroups, issued, !issued.IsZero()
 	}
-	current, ok, asked := s.currentGroups(ctx, token, subject)
+	current, ok, asked := s.currentGroups(ctx, token, subject, want)
 	if !ok {
 		return tokenGroups, time.Time{}, false
+	}
+	if (want.email && current.email == "") || (want.preferredUsername && current.preferredUsername == "") {
+		// An answer without a claim the session took from userinfo is
+		// refused (see checkUserinfoClaims); its groups may be as partial.
+		return current.groups, current.observedAt, false
+	}
+	if current.email == "" && current.preferredUsername == "" {
+		// With no identity claim, nothing tells this answer from one with
+		// only sub, which PingFederate gives when its attribute source fails.
+		return current.groups, current.observedAt, false
 	}
 	if asked && len(current.groups) == 0 && len(tokenGroups) > 0 {
 		// Groups released only in the ID token are not read.
@@ -610,8 +703,9 @@ func (s *server) sessionGroups(ctx context.Context, token, subject string, idTok
 }
 
 // currentGroups returns the userinfo answer for a token, whether it is for
-// subject, and whether userinfo was asked now. Userinfo is asked once per token.
-func (s *server) currentGroups(ctx context.Context, token, subject string) (result userinfoGroups, ok, asked bool) {
+// subject, and whether userinfo was asked now. Userinfo is asked once per token;
+// an answer without the claims in want is a failure (see userinfoClaims).
+func (s *server) currentGroups(ctx context.Context, token, subject string, want releasedClaims) (result userinfoGroups, ok, asked bool) {
 	if token == "" {
 		return userinfoGroups{}, false, false
 	}
@@ -626,7 +720,7 @@ func (s *server) currentGroups(ctx context.Context, token, subject string) (resu
 	// its own timeout stops it.
 	askCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.userinfoTimeout)
 	defer cancel()
-	claims, answeredAt, err := s.userinfoClaims(askCtx, token)
+	claims, answeredAt, err := s.userinfoClaims(askCtx, token, want, subject)
 	if err != nil {
 		failure.failures++
 		delay := userinfoRetryDelay(failure.failures)
@@ -661,7 +755,12 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, answeredAt, err := s.userinfoClaims(r.Context(), token)
+	var want releasedClaims
+	if earlier, ok := s.tokenGroups.Get(token); ok {
+		want = releasedClaims{email: earlier.email != "", preferredUsername: earlier.preferredUsername != ""}
+	}
+	idClaims, idClaimsKnown := s.idTokenClaims.Get(token)
+	claims, answeredAt, err := s.userinfoClaims(r.Context(), token, want, oidc.StringClaim(idClaims, "sub"))
 	fromUserinfo := err == nil
 	if err != nil {
 		cached, ok := s.idTokenClaims.Get(token)
@@ -676,7 +775,6 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 	// The id is used for group lookups, so userinfo must answer for the
 	// session's subject. A replica that has not seen the session cannot check.
 	subject := oidc.StringClaim(claims, "sub")
-	idClaims, idClaimsKnown := s.idTokenClaims.Get(token)
 	if fromUserinfo {
 		if subject == "" {
 			slog.Warn("userinfo answered without a subject; not reporting a profile")
@@ -702,8 +800,11 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	profile := s.profile(profileClaims)
-	// Only a live answer is current; a missing claim means no groups.
-	if fromUserinfo {
+	// Only a live answer is current; a missing claim means no groups. Every
+	// session has an email, so an answer without one may be incomplete in a
+	// way this replica cannot tell (see checkComplete); recording happens
+	// only when the session's state is read then.
+	if fromUserinfo && sessionClaim(claims, s.cfg.EmailClaim) != "" {
 		groups := oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter)
 		s.rememberGroups(r.Context(), subject, groups, answeredAt)
 	}
@@ -715,25 +816,97 @@ func (s *server) getUserInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // userinfoClaims fetches userinfo for a token, through the cache if any, and
-// returns when it answered.
-func (s *server) userinfoClaims(ctx context.Context, token string) (map[string]any, time.Time, error) {
+// returns when it answered. An answer without the identity claims in want, or
+// that userinfo releases, is an error (see checkComplete), unless it is for
+// another subject than subject, which the caller then refuses.
+func (s *server) userinfoClaims(ctx context.Context, token string, want releasedClaims, subject string) (map[string]any, time.Time, error) {
 	if s.userinfoURL == "" {
 		return nil, time.Time{}, fmt.Errorf("no userinfo endpoint is configured")
 	}
 	if s.userinfo != nil {
 		if answer, ok := s.userinfo.Get(token); ok {
+			if err := s.checkComplete(answer.claims, want, subject); err != nil {
+				s.unusableAnswers.Add(token, answerIncomplete)
+				return nil, time.Time{}, err
+			}
 			return answer.claims, answer.at, nil
 		}
 	}
 	claims, err := oidc.Userinfo(ctx, s.httpClient, s.userinfoURL, token)
 	if err != nil {
+		if errors.Is(err, oidc.ErrTokenRejected) {
+			// A revoked token must not pass on an earlier answer or
+			// confirmation, its own or the one a refresh replaced.
+			s.unusableAnswers.Add(token, tokenRejected)
+			s.confirmedIdentities.Remove(token)
+			s.tokenGroups.Remove(token)
+		}
 		return nil, time.Time{}, err
 	}
+	if err := s.checkComplete(claims, want, subject); err != nil {
+		s.unusableAnswers.Add(token, answerIncomplete)
+		return nil, time.Time{}, err
+	}
+	s.unusableAnswers.Remove(token)
 	at := time.Now()
 	if s.userinfo != nil {
 		s.userinfo.Add(token, userinfoAnswer{claims: claims, at: at})
 	}
 	return claims, at, nil
+}
+
+// releasedClaims names the identity claims a userinfo answer carries, or
+// must carry.
+type releasedClaims struct {
+	email, preferredUsername bool
+}
+
+// takenFromUserinfo is the identity claims a session took from userinfo,
+// which oauth2-proxy does for the claims its ID token lacks.
+func (s *server) takenFromUserinfo(ss state.SerializableState, idClaims map[string]any) releasedClaims {
+	return releasedClaims{
+		email:             ss.Email != "" && oidc.ClaimValue(idClaims, s.cfg.EmailClaim) == nil,
+		preferredUsername: ss.PreferredUsername != "" && oidc.ClaimValue(idClaims, "preferred_username") == nil,
+	}
+}
+
+// errIncompleteUserinfo is a userinfo answer without any of the identity
+// claims it should carry. PingFederate answers so, with only sub, when the
+// OIDC policy's attribute source fails; read as an answer, it would empty the
+// user's groups and refuse their session.
+var errIncompleteUserinfo = errors.New("userinfo answered without the identity claims it releases; treating the answer as a failure")
+
+// checkComplete fails an answer that carries none of the identity claims
+// expected of it: those in want, and those userinfo released in its last
+// complete answer for the subject. An answer missing only some of them is
+// read as it is, so a claim userinfo stops releasing takes effect at once.
+// It remembers what a complete answer released. An answer for another
+// subject than sessionSubject, when set, passes, for the caller to refuse.
+func (s *server) checkComplete(claims map[string]any, want releasedClaims, sessionSubject string) error {
+	got := releasedClaims{
+		email:             sessionClaim(claims, s.cfg.EmailClaim) != "",
+		preferredUsername: sessionClaim(claims, "preferred_username") != "",
+	}
+	subject := oidc.StringClaim(claims, "sub")
+	if sessionSubject != "" && subject != sessionSubject {
+		// An answer for someone else is not a failure: the caller refuses it.
+		return nil
+	}
+	expected := want
+	if subject != "" {
+		if before, ok := s.userinfoReleases.Get(subject); ok {
+			expected.email = expected.email || before.email
+			expected.preferredUsername = expected.preferredUsername || before.preferredUsername
+		}
+	}
+	if (expected.email || expected.preferredUsername) &&
+		!(expected.email && got.email) && !(expected.preferredUsername && got.preferredUsername) {
+		return errIncompleteUserinfo
+	}
+	if subject != "" && (got.email || got.preferredUsername) {
+		s.userinfoReleases.Add(subject, got)
+	}
+	return nil
 }
 
 // userinfoAnswer is a userinfo response and when PingFederate gave it.
