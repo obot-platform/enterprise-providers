@@ -1,236 +1,107 @@
 # PingFederate auth provider
 
-An Obot authentication provider for Ping Identity PingFederate, using the
-OpenID Connect authorization code flow.
-
-Like Obot's other auth providers it is a thin wrapper around
-[oauth2-proxy](https://github.com/obot-platform/oauth2-proxy), which owns the
-login flow and the session cookie. This provider adds what Obot needs on top:
-the endpoints Obot calls to identify the user behind a request, read their
-profile, and list their groups.
+Signs users in to Obot through Ping Identity PingFederate, using OpenID
+Connect.
 
 ## Setting up PingFederate
 
-1. Create an OAuth client (**Applications > OAuth > Clients**) for Obot:
+1. Create an OAuth client for Obot (**Applications > OAuth > Clients**):
    - Client authentication: **client secret**.
    - Grant types: **Authorization Code** and **Refresh Token**.
    - Redirect URI: Obot's public URL with a trailing slash, for example
-     `https://obot.example.com/`. Obot receives the callback at its root and
-     forwards it to the provider; `/oauth2/callback` is not what PingFederate
-     calls.
-   - PKCE: the provider always sends an `S256` code challenge, so you can
-     turn on **Require Proof Key for Code Exchange (PKCE)** for the client.
+     `https://obot.example.com/`.
+   - You can turn on **Require Proof Key for Code Exchange (PKCE)**.
    - OpenID Connect policy: release `sub`, `email`, `name` (or `given_name`
-     and `family_name`), `preferred_username`, and, for group-based access
-     control in Obot, a group membership attribute (`groups` by default).
-     Release groups in the userinfo response: the provider reads them only
-     from userinfo, so a user whose groups are released only in the ID token
-     is recorded with no groups. Releasing them in the ID token as well is
-     harmless.
-     PingFederate releases only the claims mapped to a scope the client
-     requests, so map the groups attribute to a scope (for example a
-     `groups` scope) and add that scope to **Scopes** in Obot. A user without
-     it signs in with no groups.
+     and `family_name`), `preferred_username`, and, for group-based access, a
+     group attribute (`groups` by default). Release groups in the **userinfo**
+     response; groups released only in the ID token are not read.
+   - PingFederate releases only the claims mapped to a scope the client
+     requests, so map the groups attribute to a scope, such as `groups`, and
+     add that scope to **Scopes** in Obot. Without it, users sign in with no
+     groups.
 2. In Obot, go to **Identity & Access > Auth Providers**, configure
-   **PingFederate**, and enter the client ID, client secret, and issuer URL
-   (`https://sso.example.com` or `https://sso.example.com:9031`). The issuer
-   must match the `issuer` in `<issuer>/.well-known/openid-configuration`
-   exactly, including the port and the absence of a trailing slash; the
-   provider refuses to start otherwise and says what it found.
-3. If PingFederate's TLS certificate is issued by a private CA, paste the CA
-   certificate chain (PEM) into **CA Certificate**. The provider process does
-   not inherit the Obot pod's trust store, so mounting a bundle on the pod is
-   not enough on its own; alternatively point **CA Certificate File** at a
-   path inside the container.
+   **PingFederate**, and enter the client ID, client secret, and issuer URL,
+   such as `https://sso.example.com` or `https://sso.example.com:9031`. The
+   issuer must match the `issuer` in `<issuer>/.well-known/openid-configuration`
+   exactly, including the port and without a trailing slash.
+3. If PingFederate's certificate is issued by a private CA, paste the CA chain
+   into **CA Certificate (PEM)**, or set **CA Certificate File** to a path
+   inside the Obot container. Obot's own trust store is not used for
+   PingFederate.
 
-## How Obot identifies users
+PingFederate must be reached over HTTPS, and must sign ID tokens with an RSA,
+RSA-PSS, ECDSA or EdDSA key.
 
-- The user's identity in Obot is the OIDC `sub` claim, which is stable even if
-  the email address changes. Obot stores it as the provider user ID.
-- The email address comes from the `email` claim (configurable). Logins are
-  accepted when the ID token does not carry `email_verified`, which
-  PingFederate typically omits. An explicit `email_verified: false` is
-  rejected, because an unverified address would otherwise satisfy the allowed
-  email domains. The check applies only when the email claim is `email`: with
-  another **Email Claim**, make sure users cannot set that attribute
-  themselves, or the allowed email domains no longer restrict who signs in.
-- **Name Claim** chooses the claim shown in **Identity & Access → Users → Name**
-  (default: `name`). If missing, the provider falls back to `name`, then
-  `given_name` + `family_name`, then `preferred_username`, then the email.
-  Release the name claim in userinfo or the ID token; userinfo takes precedence.
-- Groups are reported to Obot as `pingfederate/<group name>`, matching the
-  `groupIDPrefix` in the manifest. Group names are taken from the groups claim
-  verbatim; set **Groups Delimiter** when PingFederate sends them as one
-  delimited string.
-- To map groups to Obot roles (**Identity & Access > Groups** in the admin UI,
-  or `POST /api/group-role-assignments` with `groupName:
-  "pingfederate/<group>"`), list the groups under **Known Groups** so the
-  picker offers them before any member has signed in.
+## Users
 
-## How it works
-
-Obot forwards the browser's `/oauth2/start`, `/oauth2/callback` and
-`/oauth2/sign_out` requests to oauth2-proxy inside the provider, and calls
-three provider-specific endpoints over the loopback interface:
-
-| Endpoint | Purpose |
-|---|---|
-| `POST /obot-get-state` | Identifies the user behind a request from the session cookie, refreshing the upstream tokens when due. The response includes the user's groups, read from userinfo once per access token (see [Groups](#groups)). Answers 401 when userinfo contradicts the session's identity, and 503 when the identity cannot be confirmed with userinfo (see [Security checks](#security-checks)). |
-| `GET /obot-get-user-info` | Returns the profile for a bearer access token: the userinfo claims plus `id` (the subject), `name`, `email` and `picture`. Responses are cached per token for a few minutes because Obot asks often. If the userinfo endpoint is unavailable, the claims from the ID token are used. A userinfo answer without a subject, or for a different subject than the session's ID token, is an error. |
-| `POST /obot-list-user-auth-groups` | Returns the groups recorded for a provider user ID. The provider records groups from every state and userinfo lookup. An unknown ID is an error rather than an empty list, which Obot would store, dropping the user's memberships. On an error Obot leaves its stored memberships alone, but fails the request that triggered the refresh with "Authentication provider configuration error", and retries a minute later (see "When Obot finds no record" under [Groups](#groups)). |
-| `GET /obot-list-auth-groups` | Backs the group picker in Obot's admin UI. PingFederate has no directory API, so the provider lists the groups declared in **Known Groups** plus every group recorded at sign-in in the last 90 days. |
-| `GET /obot-get-auth-groups` | Resolves group IDs to names; a group's name is its ID without the `pingfederate/` prefix. Reads each ID from a repeated `id` parameter, which keeps an LDAP DN whole; the comma-joined `ids` that Obot also sends for other providers is ignored. Other providers' IDs are ignored. |
+- A user's identity is the `sub` claim, so it survives an email change.
+- The email comes from the **Email Claim** (`email`). With the default claim, a
+  user whose `email_verified` is `false` cannot sign in. If you use another
+  claim, make sure users cannot edit that attribute themselves, or **Allowed
+  E-Mail Domains** no longer restricts who signs in.
+- The name shown in Obot comes from the **Name Claim** (`name`), falling back
+  to `given_name` and `family_name`, then `preferred_username`, then the email.
+- If a user's email changes in PingFederate, they are signed out of Obot within
+  one **Token Refresh Duration**, and sign in again with the new email.
 
 ## Groups
 
-PingFederate has no API for listing groups or a user's memberships, so the
-provider learns groups from tokens and userinfo responses, and records them
-for the lookups Obot makes without a token.
+Groups appear in Obot as `pingfederate/<group name>`, with the name exactly as
+PingFederate sends it, for example
+`pingfederate/cn=Admins,ou=Groups,dc=example,dc=com`. If PingFederate sends a
+user's groups as one delimited string, set **Groups Delimiter**; leave it
+empty for LDAP DNs, which contain commas.
 
-**Keeping groups current.** A session's ID token is the one it was created
-with, and PingFederate does not issue a new one on refresh by default. So
-groups come from userinfo, which evaluates the user's attributes when it is
-asked: the provider asks it once per access token, and each refresh brings a
-new token, so a change to a user's groups in PingFederate reaches Obot within
-one **Token Refresh Duration**, without the user signing in again. Release the
-groups attribute in userinfo. A userinfo answer without the groups claim means
-the user has no groups, since PingFederate omits an empty attribute; groups
-released only in the ID token are not read. (Only an identity provider without a
-userinfo endpoint has its groups read from the ID token, ordered by its `iat`.)
+- A change to a user's groups in PingFederate reaches Obot within one **Token
+  Refresh Duration** (an hour by default), without the user signing in again.
+- PingFederate cannot list its groups, so Obot's group picker shows the groups
+  under **Known Groups**, one per line, plus every group a user has signed in
+  with in the last 90 days. List the groups you want to give roles to under
+  **Known Groups**, so you can do that before any member signs in.
+- Requests made with Obot API keys use the groups the user had at their last
+  browser sign-in or refresh.
 
-A request that refreshes the session still carries the session from before the
-refresh. The provider loads the refreshed session from the cookies the refresh
-set, and records from that, so groups follow the refresh even for a client that
-never sends the new cookies back.
+With PostgreSQL, the provider keeps users' groups in Obot's database, in the
+`pingfederate_user_groups` and `pingfederate_seen_groups` tables, so that every
+Obot replica sees them. Obot drops these tables, with the provider's session
+tables, when PingFederate is deconfigured. Without PostgreSQL, groups are kept
+in memory, and each user's are recorded again at their next request after a
+restart.
 
-Groups are recorded only from a successful userinfo answer for the session's
-subject. If userinfo fails, nothing is recorded, and the user's existing record
-stands. A user's groups are recorded under their subject only, the identifier
-Obot looks them up by, never under an email address or another attribute a
-user might share or choose.
+## When PingFederate is unavailable
 
-**Where groups are recorded.** Every Obot replica runs its own copy of the
-provider, so the records must be shared. When Obot uses PostgreSQL, which a
-multi-replica deployment requires, the provider keeps them in Obot's database,
-in two tables declared in the manifest's `postgresTables`:
+Obot confirms each user's identity with PingFederate's userinfo endpoint. While
+it is unreachable, users cannot sign in, and requests right after a session
+refresh fail, until it is back. Other requests from signed-in users keep
+working.
 
-| Table | Holds |
-|---|---|
-| `pingfederate_user_groups` | Each user's groups, under their subject. A record expires 24 hours after it was last written. |
-| `pingfederate_seen_groups` | Every group recorded at sign-in, for the group picker. A group expires 90 days after it was last seen. |
+## Settings
 
-The provider creates the tables when it starts, and only then: Obot drops them,
-with the session tables, when the provider is deconfigured or a staged switch
-to it is discarded, and a provider
-still running on another replica must not bring them back. Expired rows are
-deleted hourly.
-
-Each record carries when its groups were observed: when userinfo answered.
-Recording first reads, without locking, the user's recorded observation and
-which of their groups were seen recently. Most requests repeat what is recorded,
-and stop there. Only a newer observation, or one due for its hourly renewal,
-goes on to a conditional upsert, which PostgreSQL applies only if the
-observation is still newer than the recorded one, so a replica holding an older
-answer cannot overwrite a newer one, whatever order the writes arrive in.
-Reading first matters: an upsert locks the row it conflicts with even when it
-changes nothing, and a group every user is in would have its row locked by
-every request. Whether to write is decided by the database, not by anything a
-replica remembers.
-
-Without PostgreSQL, a single-replica installation, the provider keeps the same
-records in memory. A restart forgets them, and each user's next request records
-them again.
-
-**When Obot finds no record.** Obot keeps its own copy of each user's group
-memberships, and asks the provider for an update at most every 10 minutes per
-user, only during browser requests. Each such request first asks the provider
-for the session, which records the user's current groups, so Obot's lookup in
-the same request normally finds them. It finds no record only when userinfo
-fails on that request and the user has no current record: they have never been
-recorded, their record expired (24 hours without a write), or the in-memory
-store was restarted. Obot then leaves the memberships it has stored as they
-are, but fails that request with a 500 "Authentication provider configuration
-error", and skips lookups for that user for a minute, during which their
-requests use the stored memberships. So a userinfo outage shows a user an
-error about once a minute rather than changing their groups. Requests made
-with Obot API keys never ask the provider: they use the stored memberships, as
-of the user's last browser session.
-
-**The group picker** lists **Known Groups** plus the groups recorded at
-sign-in. List every group you intend to map to a role under **Known Groups**,
-one per line (commas belong to the name, as in an LDAP DN),
-so the picker offers it before any member has signed in.
-
-## Security checks
-
-PingFederate is a certified OpenID provider, so the provider applies the
-standard OpenID Connect checks and none of them can be turned off: it reads
-the discovery document, requires its `issuer` to match the configured issuer
-URL, sends and verifies a nonce, uses `S256` PKCE, accepts ID tokens only for
-the client ID, and rejects an explicit `email_verified: false`. The issuer and
-the authorization, token, JWKS, and userinfo endpoints in the discovery
-document must use HTTPS, except on a loopback host. The discovery document is
-read once, at startup, and the sign-in flow uses the endpoints that were
-checked, and accepts ID tokens signed with the asymmetric algorithms it
-advertises (never `none` or the HMAC algorithms).
-
-A userinfo answer is used only for the session's subject. When the ID token
-lacks the email or `preferred_username`, as it does with PingFederate's default
-of releasing claims in userinfo, oauth2-proxy takes them from userinfo without
-comparing subjects, and Obot identifies and names the user by them. So the
-provider checks each session against its own userinfo answer for the access
-token: a session is refused when that answer is for another subject, names
-none, or carries a different email or `preferred_username`, which also signs
-the user out, within one session refresh duration, if their email changed in
-PingFederate. If
-userinfo cannot answer while the access token is still valid, the request fails
-instead, until userinfo is reachable again; after a failure, the provider
-asks userinfo again for that session after five seconds, then waits twice as
-long after each further failure, up to a minute. Signed (`application/jwt`) userinfo
-answers are read like JSON ones.
-
-## Configuration
-
-All settings are environment variables; Obot passes the values entered in the
-admin UI. Required:
-
-| Variable | Meaning |
-|---|---|
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_ID` | OAuth client ID |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_SECRET` | OAuth client secret |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_ISSUER_URL` | OpenID Connect issuer |
-| `OBOT_AUTH_PROVIDER_COOKIE_SECRET` | Generated by Obot |
-| `OBOT_AUTH_PROVIDER_EMAIL_DOMAINS` | Allowed email domains, `*` for any |
-
-Optional (defaults in parentheses):
-
-| Variable | Meaning |
-|---|---|
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_CERTIFICATE` | PEM CA chain to trust for PingFederate |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_FILE` | Path to a PEM CA bundle to trust |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES` | Scopes to request (`openid email profile`); `openid` is always added |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM` | Email claim (`email`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM` | Name claim for the Users Name column (`name`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM` | Groups claim (`groups`) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER` | Delimiter when groups arrive as one string (none) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS` | Groups to list in Obot's group picker up front, one per line (none) |
-| `OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL` | Profile cache lifetime (`5m`), `0` disables |
-| `OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION` | Refresh upstream tokens after this age (`1h`) |
-| `OBOT_AUTH_PROVIDER_ENABLE_LOGGING` | oauth2-proxy request and auth logging (`false`) |
-| `OBOT_AUTH_PROVIDER_POSTGRES_*` | Session store settings, passed by Obot |
+| Setting | Variable | Default |
+|---|---|---|
+| Client ID | `OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_ID` | required |
+| Client Secret | `OBOT_PINGFEDERATE_AUTH_PROVIDER_CLIENT_SECRET` | required |
+| Issuer URL | `OBOT_PINGFEDERATE_AUTH_PROVIDER_ISSUER_URL` | required |
+| Allowed E-Mail Domains | `OBOT_AUTH_PROVIDER_EMAIL_DOMAINS` | required; `*` for any |
+| CA Certificate (PEM) | `OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_CERTIFICATE` | none |
+| CA Certificate File | `OBOT_PINGFEDERATE_AUTH_PROVIDER_CA_FILE` | none |
+| Scopes | `OBOT_PINGFEDERATE_AUTH_PROVIDER_SCOPES` | `openid email profile` |
+| Email Claim | `OBOT_PINGFEDERATE_AUTH_PROVIDER_EMAIL_CLAIM` | `email` |
+| Name Claim | `OBOT_PINGFEDERATE_AUTH_PROVIDER_NAME_CLAIM` | `name` |
+| Groups Claim | `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_CLAIM` | `groups` |
+| Groups Delimiter | `OBOT_PINGFEDERATE_AUTH_PROVIDER_GROUPS_DELIMITER` | none |
+| Known Groups | `OBOT_PINGFEDERATE_AUTH_PROVIDER_KNOWN_GROUPS` | none |
+| Userinfo Cache Duration | `OBOT_PINGFEDERATE_AUTH_PROVIDER_USERINFO_CACHE_TTL` | `5m` |
+| Token Refresh Duration | `OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION` | `1h` |
+| Enable Logging | `OBOT_AUTH_PROVIDER_ENABLE_LOGGING` | `false` |
 
 ## Development
 
 ```sh
-go test ./...                              # unit tests and an end-to-end login against a mock IdP
-PINGFEDERATE_TEST_LOGGING=1 go test ./...  # same, with oauth2-proxy's own logs
-go run ./hack/mockidp                      # a standalone mock IdP for trying the provider in Obot
+go test ./...                                    # includes sign-ins against a mock identity provider
+PINGFEDERATE_TEST_POSTGRES_DSN=... go test ./... # also runs the PostgreSQL tests
+go run ./hack/mockidp                            # a mock identity provider for trying the provider in Obot
 ```
 
-[`hack/pingfederate`](hack/pingfederate/README.md) runs a real PingFederate,
-backed by PingDirectory, in Docker, with the OAuth client and OIDC policy
-Obot needs.
-
-`internal/mockidp` is a small OpenID Connect provider used by the tests. It
-serves discovery, JWKS, the authorization code flow with PKCE, refresh tokens
-and userinfo, and signs in as a configurable user without a login page.
+[`hack/pingfederate`](hack/pingfederate/README.md) runs a real PingFederate in
+Docker, configured for Obot.
