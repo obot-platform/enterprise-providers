@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/util"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
 )
 
@@ -407,5 +408,101 @@ func TestRootReportsListenURL(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Body.String() != "http://127.0.0.1:9999" {
 		t.Errorf("body = %q", rec.Body.String())
+	}
+}
+
+// Claims are read as oauth2-proxy copies them into a session, so values the
+// two agree on compare equal however the identity provider releases them.
+func TestSessionClaimMatchesOAuth2Proxy(t *testing.T) {
+	claims := map[string]any{
+		"email":   "ada@example.com",
+		"names":   []any{"ada", "lovelace"},
+		"number":  float64(42),
+		"null":    nil,
+		"profile": map[string]any{"login": "ada"},
+	}
+	for name, want := range map[string]any{
+		"email":         "ada@example.com",
+		"names":         []any{"ada", "lovelace"},
+		"number":        float64(42),
+		"profile.login": "ada",
+	} {
+		var expected string
+		if err := util.CoerceClaim(want, &expected); err != nil {
+			t.Fatal(err)
+		}
+		if got := sessionClaim(claims, name); got != expected {
+			t.Errorf("sessionClaim(%q) = %q, want %q as oauth2-proxy gives it", name, got, expected)
+		}
+	}
+	// A claim named with a dot that is present, even as null, is not looked
+	// up as a path, as oauth2-proxy does.
+	dotted := map[string]any{"a.b": nil, "a": map[string]any{"b": "x@y.com"}}
+	if claimValue(dotted, "a.b") != nil {
+		t.Error(`claim "a.b" present as null should be missing, not read from a.b's path`)
+	}
+	for _, name := range []string{"null", "missing", "profile.missing", ""} {
+		if claimValue(claims, name) != nil || sessionClaim(claims, name) != "" {
+			t.Errorf("claim %q should be missing", name)
+		}
+	}
+}
+
+// A preferred_username released as an array, in the ID token or only in
+// userinfo, must not refuse a session that agrees with userinfo.
+func TestCheckUserinfoClaimsWithNonStringClaims(t *testing.T) {
+	names := []any{"ada"}
+	var calls atomic.Int32
+	upstream := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com", "preferred_username": names})
+	s := newTestServer(t, upstream.URL, time.Minute)
+	// The provider's own userinfo answer for the token, as recordSession asks.
+	if _, ok, _ := s.currentGroups(t.Context(), "tok", "sub-1"); !ok {
+		t.Fatal("userinfo was not answered for sub-1")
+	}
+	// The session as oauth2-proxy builds it from the same claims.
+	var sessionName string
+	if err := util.CoerceClaim(names, &sessionName); err != nil {
+		t.Fatal(err)
+	}
+	ss := state.SerializableState{AccessToken: "tok", Email: "ada@example.com", PreferredUsername: sessionName}
+
+	if got := s.checkUserinfoClaims(ss, "sub-1", map[string]any{"sub": "sub-1", "preferred_username": names}); got != userinfoConsistent {
+		t.Errorf("array claim in the ID token: verdict %d, want consistent", got)
+	}
+	if got := s.checkUserinfoClaims(ss, "sub-1", map[string]any{"sub": "sub-1"}); got != userinfoConsistent {
+		t.Errorf("array claim only in userinfo: verdict %d, want consistent", got)
+	}
+	ss.PreferredUsername = "eve"
+	if got := s.checkUserinfoClaims(ss, "sub-1", map[string]any{"sub": "sub-1"}); got != userinfoContradicts {
+		t.Errorf("different username only in userinfo: verdict %d, want contradicts", got)
+	}
+
+	// The array is only in the ID token, and userinfo does not release it:
+	// oauth2-proxy took it from the ID token, so there is nothing to compare.
+	quiet := userinfoServer(t, &calls, map[string]any{"sub": "sub-1", "email": "ada@example.com"})
+	s = newTestServer(t, quiet.URL, time.Minute)
+	if _, ok, _ := s.currentGroups(t.Context(), "tok", "sub-1"); !ok {
+		t.Fatal("userinfo was not answered for sub-1")
+	}
+	ss.PreferredUsername = sessionName
+	if got := s.checkUserinfoClaims(ss, "sub-1", map[string]any{"sub": "sub-1", "preferred_username": names}); got != userinfoConsistent {
+		t.Errorf("array claim only in the ID token: verdict %d, want consistent", got)
+	}
+}
+
+// Numbers in userinfo read exactly, as oauth2-proxy reads them, so a large or
+// decimal preferred_username compares equal to the session's.
+func TestUserinfoNumbersReadAsOAuth2ProxyReadsThem(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"sub":"sub-1","preferred_username":12345678901234567,"email":1.10}`))
+	}))
+	t.Cleanup(srv.Close)
+	s := newTestServer(t, srv.URL, time.Minute)
+	if _, ok, _ := s.currentGroups(t.Context(), "tok", "sub-1"); !ok {
+		t.Fatal("userinfo was not answered for sub-1")
+	}
+	answer, _ := s.tokenGroups.Get("tok")
+	if answer.preferredUsername != "12345678901234567" || answer.email != "1.10" {
+		t.Errorf("answer = username %q, email %q, want the numbers as written", answer.preferredUsername, answer.email)
 	}
 }

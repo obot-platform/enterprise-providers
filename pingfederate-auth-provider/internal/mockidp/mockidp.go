@@ -7,6 +7,8 @@ package mockidp
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -71,6 +73,19 @@ type Config struct {
 	// OmitIDTokenOnRefresh leaves the ID token out of refresh responses,
 	// which is PingFederate's default.
 	OmitIDTokenOnRefresh bool
+	// Userinfo, when set, decides each userinfo answer: given the 1-based
+	// number of the userinfo request and the access token's owner, it returns
+	// the user to answer as, and an HTTP status other than 200 to fail with,
+	// or 0. It stands in for a misbehaving identity provider.
+	Userinfo func(n int, owner User) (User, int)
+	// OmitUserinfoSubject leaves sub out of userinfo answers.
+	OmitUserinfoSubject bool
+	// UserinfoAsJWT answers userinfo as a signed JWT (application/jwt), as
+	// PingFederate can be configured to.
+	UserinfoAsJWT bool
+	// SignES256 signs ID tokens with ES256 instead of RS256, and advertises
+	// the algorithms PingFederate does, none and HS256 included.
+	SignES256 bool
 }
 
 // AuthorizationRequest records what a client sent to the authorization
@@ -107,9 +122,10 @@ type tokenRecord struct {
 // IDP is the provider. Set its issuer to the base URL it is served on before
 // handling requests, because the discovery document and ID tokens carry it.
 type IDP struct {
-	cfg Config
-	key *rsa.PrivateKey
-	kid string
+	cfg   Config
+	key   *rsa.PrivateKey
+	ecKey *ecdsa.PrivateKey
+	kid   string
 
 	mu             sync.Mutex
 	issuer         string
@@ -127,6 +143,12 @@ func New(cfg Config) *IDP {
 	if err != nil {
 		panic(fmt.Sprintf("mockidp: generate key: %v", err))
 	}
+	var ecKey *ecdsa.PrivateKey
+	if cfg.SignES256 {
+		if ecKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
+			panic(fmt.Sprintf("mockidp: generate key: %v", err))
+		}
+	}
 	if cfg.AccessTokenLifetime == 0 {
 		cfg.AccessTokenLifetime = time.Hour
 	}
@@ -139,6 +161,7 @@ func New(cfg Config) *IDP {
 	return &IDP{
 		cfg:           cfg,
 		key:           key,
+		ecKey:         ecKey,
 		kid:           "mock-" + randomID(4),
 		codes:         map[string]authCode{},
 		tokens:        map[string]tokenRecord{},
@@ -230,7 +253,7 @@ func (i *IDP) discovery(w http.ResponseWriter, _ *http.Request) {
 		"jwks_uri":                              issuer + JWKSPath,
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"id_token_signing_alg_values_supported": i.signingAlgs(),
 		"scopes_supported":                      []string{"openid", "profile", "email", "groups"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"S256", "plain"},
@@ -423,8 +446,26 @@ func (i *IDP) userinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := map[string]any{"sub": record.user.Subject}
-	i.addProfileClaims(claims, record.user, true, i.cfg.GroupsInUserinfo)
+	user := record.user
+	if i.cfg.Userinfo != nil {
+		var status int
+		if user, status = i.cfg.Userinfo(i.counts.Userinfo, record.user); status != 0 {
+			writeJSON(w, status, map[string]string{"error": "server_error"})
+			return
+		}
+	}
+	claims := map[string]any{"sub": user.Subject}
+	if i.cfg.OmitUserinfoSubject {
+		delete(claims, "sub")
+	}
+	i.addProfileClaims(claims, user, true, i.cfg.GroupsInUserinfo)
+	if i.cfg.UserinfoAsJWT {
+		claims["iss"] = i.issuer
+		claims["aud"] = i.cfg.ClientID
+		w.Header().Set("Content-Type", "application/jwt")
+		_, _ = w.Write([]byte(i.sign(claims)))
+		return
+	}
 	writeJSON(w, http.StatusOK, claims)
 }
 
@@ -460,6 +501,25 @@ func (i *IDP) jwks(w http.ResponseWriter, _ *http.Request) {
 	i.counts.JWKS++
 	i.mu.Unlock()
 
+	if i.ecKey != nil {
+		// The uncompressed point: 0x04, then X and Y, 32 bytes each.
+		point, err := i.ecKey.PublicKey.Bytes()
+		if err != nil {
+			panic(fmt.Sprintf("mockidp: encode key: %v", err))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"keys": []map[string]string{{
+				"kty": "EC",
+				"use": "sig",
+				"alg": "ES256",
+				"kid": i.kid,
+				"crv": "P-256",
+				"x":   base64.RawURLEncoding.EncodeToString(point[1:33]),
+				"y":   base64.RawURLEncoding.EncodeToString(point[33:65]),
+			}},
+		})
+		return
+	}
 	pub := i.key.PublicKey
 	writeJSON(w, http.StatusOK, map[string]any{
 		"keys": []map[string]string{{
@@ -473,12 +533,32 @@ func (i *IDP) jwks(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// sign produces an RS256 JWT.
+// signingAlgs is what discovery advertises for ID token signatures.
+func (i *IDP) signingAlgs() []string {
+	if i.cfg.SignES256 {
+		return []string{"none", "HS256", "RS256", "ES256", "PS256"}
+	}
+	return []string{"RS256"}
+}
+
+// sign produces a JWT signed with RS256, or ES256 when configured.
 func (i *IDP) sign(claims map[string]any) string {
-	header, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT", "kid": i.kid})
+	alg := "RS256"
+	if i.ecKey != nil {
+		alg = "ES256"
+	}
+	header, _ := json.Marshal(map[string]string{"alg": alg, "typ": "JWT", "kid": i.kid})
 	payload, _ := json.Marshal(claims)
 	signingInput := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
 	digest := sha256.Sum256([]byte(signingInput))
+	if i.ecKey != nil {
+		r, sig, err := ecdsa.Sign(rand.Reader, i.ecKey, digest[:])
+		if err != nil {
+			panic(fmt.Sprintf("mockidp: sign: %v", err))
+		}
+		raw := append(r.FillBytes(make([]byte, 32)), sig.FillBytes(make([]byte, 32))...)
+		return signingInput + "." + base64.RawURLEncoding.EncodeToString(raw)
+	}
 	signature, err := rsa.SignPKCS1v15(rand.Reader, i.key, crypto.SHA256, digest[:])
 	if err != nil {
 		panic(fmt.Sprintf("mockidp: sign: %v", err))

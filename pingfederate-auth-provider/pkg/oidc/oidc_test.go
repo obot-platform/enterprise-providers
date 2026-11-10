@@ -255,3 +255,34 @@ func TestHTTPClientDoesNotFollowRedirects(t *testing.T) {
 		t.Errorf("the redirect target was called %d times, want 0", n)
 	}
 }
+
+// Only algorithms verifiable with the JWKS endpoint's keys are passed on:
+// PingFederate also advertises none and the HMAC algorithms.
+func TestDiscoverySigningAlgs(t *testing.T) {
+	d := Discovery{IDTokenSigningAlgs: []string{"none", "HS256", "HS384", "HS512", "RS256", "RS384", "ES256", "PS512", "EdDSA", "bogus"}}
+	if got := strings.Join(d.SigningAlgs(), ","); got != "RS256,RS384,ES256,PS512,EdDSA" {
+		t.Errorf("SigningAlgs() = %q", got)
+	}
+	if got := (&Discovery{}).SigningAlgs(); len(got) != 0 {
+		t.Errorf("SigningAlgs() without any advertised = %q, want none", got)
+	}
+}
+
+// PingFederate can sign its userinfo answers; they are read like oauth2-proxy
+// reads them.
+func TestUserinfoReadsSignedAnswers(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"u1","email":"u1@example.com"}`))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/jwt; charset=utf-8")
+		_, _ = w.Write([]byte("eyJhbGciOiJSUzI1NiJ9." + payload + ".c2ln\n"))
+	}))
+	defer srv.Close()
+
+	claims, err := Userinfo(context.Background(), srv.Client(), srv.URL, "good")
+	if err != nil {
+		t.Fatalf("Userinfo: %v", err)
+	}
+	if StringClaim(claims, "sub") != "u1" || StringClaim(claims, "email") != "u1@example.com" {
+		t.Errorf("claims = %v", claims)
+	}
+}

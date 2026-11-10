@@ -5,6 +5,7 @@
 package oidc
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -12,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -30,6 +32,30 @@ type Discovery struct {
 	TokenEndpoint         string `json:"token_endpoint"`
 	UserinfoEndpoint      string `json:"userinfo_endpoint"`
 	JwksURI               string `json:"jwks_uri"`
+	// IDTokenSigningAlgs is id_token_signing_alg_values_supported.
+	IDTokenSigningAlgs []string `json:"id_token_signing_alg_values_supported"`
+}
+
+// asymmetricSigningAlgs are the ID token signature algorithms verifiable with
+// the keys at the JWKS endpoint. PingFederate also advertises none and the
+// HMAC algorithms, which sign with the client secret; neither is accepted.
+var asymmetricSigningAlgs = map[string]bool{
+	"RS256": true, "RS384": true, "RS512": true,
+	"PS256": true, "PS384": true, "PS512": true,
+	"ES256": true, "ES384": true, "ES512": true,
+	"EdDSA": true,
+}
+
+// SigningAlgs returns the advertised ID token signature algorithms that can be
+// verified with the JWKS endpoint's keys.
+func (d *Discovery) SigningAlgs() []string {
+	var algs []string
+	for _, alg := range d.IDTokenSigningAlgs {
+		if asymmetricSigningAlgs[alg] {
+			algs = append(algs, alg)
+		}
+	}
+	return algs
 }
 
 // NewHTTPClient returns a client that trusts the system roots plus the PEM
@@ -103,7 +129,9 @@ func Discover(ctx context.Context, client *http.Client, issuer string) (*Discove
 }
 
 // Userinfo calls the userinfo endpoint with the given bearer token and returns
-// the raw claims.
+// the raw claims. A signed answer (application/jwt), which PingFederate can be
+// configured to give, is read like oauth2-proxy reads it, without checking the
+// signature: it comes over the same verified TLS connection as a JSON answer.
 func Userinfo(ctx context.Context, client *http.Client, userinfoURL, authorization string) (map[string]any, error) {
 	if userinfoURL == "" {
 		return nil, fmt.Errorf("no userinfo endpoint configured")
@@ -130,8 +158,19 @@ func Userinfo(ctx context.Context, client *http.Client, userinfoURL, authorizati
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("userinfo returned %d%s: %s", resp.StatusCode, redirectTarget(resp), strings.TrimSpace(string(body)))
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read userinfo: %w", err)
+	}
+	if mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mediaType == "application/jwt" {
+		claims, err := UnverifiedClaims(strings.TrimSpace(string(body)))
+		if err != nil {
+			return nil, fmt.Errorf("decode signed userinfo: %w", err)
+		}
+		return claims, nil
+	}
 	var claims map[string]any
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&claims); err != nil {
+	if err := decodeClaims(body, &claims); err != nil {
 		return nil, fmt.Errorf("decode userinfo: %w", err)
 	}
 	return claims, nil
@@ -147,6 +186,15 @@ func redirectTarget(resp *http.Response) string {
 	return ""
 }
 
+// decodeClaims decodes a JSON object of claims keeping numbers exact, as
+// json.Number, the way oauth2-proxy reads claims: a number then reads the same
+// here as in the session oauth2-proxy built from it.
+func decodeClaims(data []byte, claims *map[string]any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode(claims)
+}
+
 // UnverifiedClaims decodes the payload of a JWT without checking its
 // signature. Only call this on tokens oauth2-proxy has already verified.
 func UnverifiedClaims(token string) (map[string]any, error) {
@@ -159,7 +207,7 @@ func UnverifiedClaims(token string) (map[string]any, error) {
 		return nil, fmt.Errorf("decode JWT payload: %w", err)
 	}
 	var claims map[string]any
-	if err := json.Unmarshal(payload, &claims); err != nil {
+	if err := decodeClaims(payload, &claims); err != nil {
 		return nil, fmt.Errorf("parse JWT payload: %w", err)
 	}
 	return claims, nil

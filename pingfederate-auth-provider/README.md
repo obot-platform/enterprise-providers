@@ -75,7 +75,7 @@ three provider-specific endpoints over the loopback interface:
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /obot-get-state` | Identifies the user behind a request from the session cookie, refreshing the upstream tokens when due. The response includes the user's groups, read from userinfo once per access token (see [Groups](#groups)). |
+| `POST /obot-get-state` | Identifies the user behind a request from the session cookie, refreshing the upstream tokens when due. The response includes the user's groups, read from userinfo once per access token (see [Groups](#groups)). Answers 401 when userinfo contradicts the session's identity, and 503 when the identity cannot be confirmed with userinfo (see [Security checks](#security-checks)). |
 | `GET /obot-get-user-info` | Returns the profile for a bearer access token: the userinfo claims plus `id` (the subject), `name`, `email` and `picture`. Responses are cached per token for a few minutes because Obot asks often. If the userinfo endpoint is unavailable, the claims from the ID token are used. A userinfo answer without a subject, or for a different subject than the session's ID token, is an error. |
 | `POST /obot-list-user-auth-groups` | Returns the groups recorded for a provider user ID. The provider records groups from every state and userinfo lookup. An unknown ID is an error rather than an empty list, which Obot would store, dropping the user's memberships. On an error Obot leaves its stored memberships alone, but fails the request that triggered the refresh with "Authentication provider configuration error", and retries a minute later (see "When Obot finds no record" under [Groups](#groups)). |
 | `GET /obot-list-auth-groups` | Backs the group picker in Obot's admin UI. PingFederate has no directory API, so the provider lists the groups declared in **Known Groups** plus every group recorded at sign-in in the last 90 days. |
@@ -169,7 +169,23 @@ the discovery document, requires its `issuer` to match the configured issuer
 URL, sends and verifies a nonce, uses `S256` PKCE, accepts ID tokens only for
 the client ID, and rejects an explicit `email_verified: false`. The issuer and
 the authorization, token, JWKS, and userinfo endpoints in the discovery
-document must use HTTPS, except on a loopback host.
+document must use HTTPS, except on a loopback host. The discovery document is
+read once, at startup, and the sign-in flow uses the endpoints that were
+checked, and accepts ID tokens signed with the asymmetric algorithms it
+advertises (never `none` or the HMAC algorithms).
+
+A userinfo answer is used only for the session's subject. When the ID token
+lacks the email or `preferred_username`, as it does with PingFederate's default
+of releasing claims in userinfo, oauth2-proxy takes them from userinfo without
+comparing subjects, and Obot identifies and names the user by them. So the
+provider checks each session against its own userinfo answer for the access
+token: a session is refused when that answer is for another subject, names
+none, or carries a different email or `preferred_username`, which also signs
+the user out, within one session refresh duration, if their email changed in
+PingFederate. If
+userinfo cannot answer while the access token is still valid, the request fails
+instead, until userinfo is reachable again. Signed (`application/jwt`) userinfo
+answers are read like JSON ones.
 
 ## Configuration
 

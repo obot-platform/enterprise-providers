@@ -16,6 +16,7 @@ import (
 	oauth2proxy "github.com/oauth2-proxy/oauth2-proxy/v7"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/requests"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/util"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/validation"
 	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/enterprise-providers/pingfederate-auth-provider/pkg/oidc"
@@ -58,6 +59,10 @@ type userinfoGroups struct {
 	observedAt time.Time
 	// subject is the subject userinfo answered for.
 	subject string
+	// email and preferredUsername are the identity claims of the answer,
+	// which oauth2-proxy copies into a session whose ID token lacks them.
+	email             string
+	preferredUsername string
 	// groups is the groups claim, empty when userinfo carries none:
 	// PingFederate omits an empty multi-valued attribute.
 	groups []string
@@ -130,7 +135,7 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 		slog.Warn("the discovery document has no userinfo endpoint; user profiles will be read from ID token claims only")
 	}
 
-	proxy, err := newOAuthProxyWithRetry(cfg)
+	proxy, err := newOAuthProxyWithRetry(cfg, discovery)
 	if err != nil {
 		return nil, err
 	}
@@ -170,12 +175,12 @@ func newServer(ctx context.Context, cfg *settings, listenURL string) (*server, e
 // when it starts, and every replica starts the provider at once when it is
 // first configured, so creating the same tables at the same moment can fail on
 // all but one of them.
-func newOAuthProxyWithRetry(cfg *settings) (*oauth2proxy.OAuthProxy, error) {
-	proxy, err := newOAuthProxy(cfg)
+func newOAuthProxyWithRetry(cfg *settings, discovery *oidc.Discovery) (*oauth2proxy.OAuthProxy, error) {
+	proxy, err := newOAuthProxy(cfg, discovery)
 	for attempt := 1; err != nil && cfg.PostgresConnectionDSN != "" && attempt < 3; attempt++ {
 		slog.Warn("failed to start oauth2-proxy; retrying", "attempt", attempt, "error", err)
 		time.Sleep(time.Duration(attempt) * time.Second)
-		proxy, err = newOAuthProxy(cfg)
+		proxy, err = newOAuthProxy(cfg, discovery)
 	}
 	return proxy, err
 }
@@ -184,7 +189,12 @@ func newOAuthProxyWithRetry(cfg *settings) (*oauth2proxy.OAuthProxy, error) {
 // PingFederate. Everything Obot-specific (cookie name, redirect URL, session
 // store) mirrors the other Obot auth providers so the gateway treats this one
 // the same way.
-func newOAuthProxy(cfg *settings) (*oauth2proxy.OAuthProxy, error) {
+//
+// oauth2-proxy is given the endpoints from discovery, the document newServer
+// fetched and checked, and does not fetch its own: a second fetch could answer
+// differently, for example from a misconfigured node of a PingFederate cluster,
+// and nothing would check the endpoints it named.
+func newOAuthProxy(cfg *settings, discovery *oidc.Discovery) (*oauth2proxy.OAuthProxy, error) {
 	// oauth2-proxy sends the client secret, authorization codes, and refresh
 	// tokens through this shared client, which follows redirects. Go keeps the
 	// Authorization header and resends the body on a same-host redirect, even
@@ -201,6 +211,16 @@ func newOAuthProxy(cfg *settings) (*oauth2proxy.OAuthProxy, error) {
 	provider.ClientID = cfg.ClientID
 	provider.ClientSecret = cfg.ClientSecret
 	provider.OIDCIssuerURL = cfg.issuerURL
+	// The issuer URL still verifies every ID token's issuer, and the JWKS
+	// endpoint its signature.
+	provider.SkipOIDCDiscovery = true
+	provider.LoginURL = discovery.AuthorizationEndpoint
+	provider.RedeemURL = discovery.TokenEndpoint
+	provider.ProfileURL = discovery.UserinfoEndpoint
+	provider.OIDCJwksURL = discovery.JwksURI
+	// Discovery used to supply the accepted signature algorithms; without
+	// them oauth2-proxy accepts RS256 only.
+	provider.OIDCEnabledSigningAlgs = discovery.SigningAlgs()
 	provider.Scope = cfg.scopes
 	provider.OIDCEmailClaim = cfg.EmailClaim
 	// The session's User field, which Obot stores as the provider user ID,
@@ -311,17 +331,39 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.recordSession(r.Context(), &ss)
+	checked := ss
+	subject, idClaims := s.recordSession(r.Context(), &ss)
 	if len(ss.SetCookies) > 0 {
 		// The state of a request that refreshed the session is the session
 		// from before the refresh. Load the refreshed one from the cookies the
 		// refresh set, and record from it, so that groups follow the refresh
-		// even if the client never sends those cookies back.
+		// even if the client never sends those cookies back. It carries the
+		// new access token, so it is the one whose userinfo is checked, and
+		// the identity Obot is given is its: a refresh that returns an ID
+		// token rebuilds the session's email and username, and the
+		// pre-refresh ones may never have been checked.
 		if refreshed, ok := s.refreshedState(req, ss.SetCookies); ok {
-			s.recordSession(r.Context(), &refreshed)
+			subject, idClaims = s.recordSession(r.Context(), &refreshed)
+			checked = refreshed
+			ss.User = refreshed.User
+			ss.Email = refreshed.Email
+			ss.PreferredUsername = refreshed.PreferredUsername
+			ss.AccessToken = refreshed.AccessToken
+			ss.IDToken = refreshed.IDToken
+			ss.ExpiresOn = refreshed.ExpiresOn
 			ss.GroupInfos = refreshed.GroupInfos
 		}
 		ss.SetCookies = append(ss.SetCookies, expireSupersededCookies(req, ss.SetCookies)...)
+	}
+	switch s.checkUserinfoClaims(checked, subject, idClaims) {
+	case userinfoContradicts:
+		slog.Warn("userinfo contradicts the session: it answered for another subject, or for none, or with other identity claims; refusing the session")
+		http.Error(w, "the session's identity does not match userinfo", http.StatusUnauthorized)
+		return
+	case userinfoUnconfirmed:
+		slog.Warn("could not confirm the session's identity claims with userinfo; failing the request")
+		http.Error(w, "could not confirm the session's identity with userinfo", http.StatusServiceUnavailable)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -434,9 +476,108 @@ func cookieFamily(name string) string {
 	return name
 }
 
+// userinfoCheck is the verdict of checkUserinfoClaims.
+type userinfoCheck int
+
+const (
+	userinfoConsistent userinfoCheck = iota
+	userinfoContradicts
+	userinfoUnconfirmed
+)
+
+// checkUserinfoClaims checks a session against the provider's own userinfo
+// answer for its access token.
+//
+// oauth2-proxy reads any claim the ID token lacks, such as the email that
+// PingFederate releases only in userinfo by default, from its own userinfo
+// request, without comparing subjects as OpenID Connect requires. Obot
+// identifies the user by that email and names them by preferred_username. So
+// the session is contradicted when the provider's answer is for another
+// subject, or for none, or carries a different value for a claim the session
+// can only have taken from userinfo. Comparing the claims, not just the
+// subject, also catches two userinfo requests that were answered differently.
+//
+// A session with such claims is unconfirmed when there is no answer to check
+// it against while its access token is still valid, for example because
+// userinfo failed: it fails rather than passes. Once the token has expired,
+// userinfo cannot answer for it; the session stands, and the token the next
+// refresh brings is checked.
+func (s *server) checkUserinfoClaims(ss state.SerializableState, subject string, idClaims map[string]any) userinfoCheck {
+	if s.userinfoURL == "" || ss.AccessToken == "" || subject == "" {
+		// Without a userinfo endpoint, oauth2-proxy reads no claims from it.
+		return userinfoConsistent
+	}
+	answer, answered := s.tokenGroups.Get(ss.AccessToken)
+	if answered && answer.subject != subject {
+		return userinfoContradicts
+	}
+
+	type claim struct{ session, answer string }
+	var fromUserinfo []claim
+	if ss.Email != "" && claimValue(idClaims, s.cfg.EmailClaim) == nil {
+		fromUserinfo = append(fromUserinfo, claim{ss.Email, answer.email})
+	}
+	if ss.PreferredUsername != "" && claimValue(idClaims, "preferred_username") == nil {
+		fromUserinfo = append(fromUserinfo, claim{ss.PreferredUsername, answer.preferredUsername})
+	}
+	if len(fromUserinfo) == 0 {
+		return userinfoConsistent
+	}
+	if !answered {
+		if ss.ExpiresOn != nil && ss.ExpiresOn.Before(time.Now()) {
+			return userinfoConsistent
+		}
+		return userinfoUnconfirmed
+	}
+	for _, c := range fromUserinfo {
+		if c.session != c.answer {
+			return userinfoContradicts
+		}
+	}
+	return userinfoConsistent
+}
+
+// claimValue looks a claim up the way oauth2-proxy does when it builds a
+// session: by name, then, only if no claim has that name, as a dot-separated
+// path into nested objects. A null value counts as missing.
+func claimValue(claims map[string]any, name string) any {
+	if name == "" {
+		return nil
+	}
+	if value, ok := claims[name]; ok {
+		// Present, even as null: oauth2-proxy then does not try the path.
+		return value
+	}
+	var current any = claims
+	for _, part := range strings.Split(name, ".") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = object[part]
+	}
+	return current
+}
+
+// sessionClaim returns a claim as oauth2-proxy copies it into a session: a
+// string as it is, and any other value in its JSON form, as util.CoerceClaim
+// gives it. A missing claim is empty.
+func sessionClaim(claims map[string]any, name string) string {
+	value := claimValue(claims, name)
+	if value == nil {
+		return ""
+	}
+	var coerced string
+	if err := util.CoerceClaim(value, &coerced); err != nil {
+		return ""
+	}
+	return coerced
+}
+
 // recordSession fills in the group information for a session and records it
-// under the user's subject, the identifier Obot looks a user's groups up by.
-func (s *server) recordSession(ctx context.Context, ss *state.SerializableState) {
+// under the user's subject, the identifier Obot looks a user's groups up by,
+// and returns that subject and the claims of the session's ID token.
+func (s *server) recordSession(ctx context.Context, ss *state.SerializableState) (string, map[string]any) {
 	claims := map[string]any{}
 	claimsReadable := true
 	if ss.IDToken != "" {
@@ -472,6 +613,7 @@ func (s *server) recordSession(ctx context.Context, ss *state.SerializableState)
 	if ss.AccessToken != "" && len(claims) > 0 {
 		s.idTokenClaims.Add(ss.AccessToken, claims)
 	}
+	return subject, claims
 }
 
 // sessionGroups returns the user's groups for a session, when they were
@@ -530,9 +672,11 @@ func (s *server) currentGroups(ctx context.Context, token, subject string) (resu
 		return userinfoGroups{}, false, true
 	}
 	result = userinfoGroups{
-		subject:    oidc.StringClaim(claims, "sub"),
-		observedAt: answeredAt,
-		groups:     oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter),
+		subject:           oidc.StringClaim(claims, "sub"),
+		email:             sessionClaim(claims, s.cfg.EmailClaim),
+		preferredUsername: sessionClaim(claims, "preferred_username"),
+		observedAt:        answeredAt,
+		groups:            oidc.StringsClaim(claims, s.cfg.GroupsClaim, s.cfg.GroupsDelimiter),
 	}
 	s.tokenGroups.Add(token, result)
 	if result.subject != subject {

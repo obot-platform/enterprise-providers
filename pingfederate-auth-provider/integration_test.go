@@ -888,3 +888,185 @@ func TestOAuthProxyClientDoesNotFollowRedirects(t *testing.T) {
 		t.Errorf("status = %d, redirect target called %d times; want the 307 returned and the target never called", resp.StatusCode, targetCalls.Load())
 	}
 }
+
+// oauth2-proxy is configured from the discovery document the provider fetched
+// and checked, and fetches none of its own, whose endpoints nothing would
+// check. Signing in proves it has the endpoints it needs.
+func TestOAuthProxyUsesCheckedDiscovery(t *testing.T) {
+	idp := startIDP(t, defaultIDPConfig(), false)
+	p := mustStartProvider(t, idp.Issuer(), nil)
+	p.mustLogin(t)
+	p.mustGetState(t)
+
+	if got := idp.Counts().Discovery; got != 1 {
+		t.Errorf("discovery fetched %d times, want once, by the provider itself", got)
+	}
+	if got := idp.Counts().JWKS; got == 0 {
+		t.Error("the ID token's signature was not checked against the JWKS endpoint")
+	}
+}
+
+// PingFederate releases email in userinfo only by default, and oauth2-proxy
+// copies it into the session from its own userinfo request without comparing
+// subjects. The provider checks the session against its own userinfo answer,
+// since Obot identifies the user by that email: a contradiction refuses the
+// session (401), and no answer at all fails the request (503).
+func TestSessionIdentityIsCheckedAgainstUserinfo(t *testing.T) {
+	eve := mockidp.User{Subject: "sub-eve", Email: "eve@example.com", Name: "Eve", PreferredUsername: "eve"}
+	// oauth2-proxy asks userinfo first, during sign-in; the provider asks
+	// next, on the first state request.
+	const oauth2ProxyRequest = 1
+	for _, tc := range []struct {
+		name      string
+		configure func(*mockidp.Config)
+		wantState int
+	}{
+		{
+			name:      "matching answers",
+			configure: func(*mockidp.Config) {},
+			wantState: http.StatusOK,
+		},
+		{
+			name: "another subject",
+			configure: func(c *mockidp.Config) {
+				c.Userinfo = func(int, mockidp.User) (mockidp.User, int) { return eve, 0 }
+			},
+			wantState: http.StatusUnauthorized,
+		},
+		{
+			name:      "no subject",
+			configure: func(c *mockidp.Config) { c.OmitUserinfoSubject = true },
+			wantState: http.StatusUnauthorized,
+		},
+		{
+			name: "oauth2-proxy's request answered for another subject",
+			configure: func(c *mockidp.Config) {
+				c.Userinfo = func(n int, owner mockidp.User) (mockidp.User, int) {
+					if n == oauth2ProxyRequest {
+						return eve, 0
+					}
+					return owner, 0
+				}
+			},
+			wantState: http.StatusUnauthorized,
+		},
+		{
+			name: "provider's request fails",
+			configure: func(c *mockidp.Config) {
+				c.Userinfo = func(n int, owner mockidp.User) (mockidp.User, int) {
+					if n == oauth2ProxyRequest {
+						return eve, 0
+					}
+					return owner, http.StatusServiceUnavailable
+				}
+			},
+			wantState: http.StatusServiceUnavailable,
+		},
+		{
+			name:      "signed userinfo",
+			configure: func(c *mockidp.Config) { c.UserinfoAsJWT = true },
+			wantState: http.StatusOK,
+		},
+		{
+			name: "signed userinfo for another subject",
+			configure: func(c *mockidp.Config) {
+				c.UserinfoAsJWT = true
+				c.Userinfo = func(int, mockidp.User) (mockidp.User, int) { return eve, 0 }
+			},
+			wantState: http.StatusUnauthorized,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultIDPConfig()
+			cfg.EmailInIDToken = false
+			tc.configure(&cfg)
+			idp := startIDP(t, cfg, false)
+			p := mustStartProvider(t, idp.Issuer(), nil)
+
+			p.mustLogin(t)
+			ss, resp := p.getState(t)
+			if resp.StatusCode != tc.wantState {
+				t.Fatalf("state: status = %d (user %q, email %q), want %d", resp.StatusCode, ss.User, ss.Email, tc.wantState)
+			}
+			if tc.wantState == http.StatusOK && (ss.User != "sub-ada" || ss.Email != "ada@example.com") {
+				t.Errorf("state = user %q, email %q, want Ada's", ss.User, ss.Email)
+			}
+		})
+	}
+}
+
+// The token a refresh brings is checked too: if userinfo answers for someone
+// else once the session has been refreshed, the refreshing request is refused.
+func TestRefreshedSessionIdentityIsCheckedAgainstUserinfo(t *testing.T) {
+	eve := mockidp.User{Subject: "sub-eve", Email: "eve@example.com"}
+	var lie atomic.Bool
+	cfg := defaultIDPConfig()
+	cfg.EmailInIDToken = false
+	cfg.OmitIDTokenOnRefresh = true
+	cfg.Userinfo = func(_ int, owner mockidp.User) (mockidp.User, int) {
+		if lie.Load() {
+			return eve, 0
+		}
+		return owner, 0
+	}
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+	p.mustLogin(t)
+	p.mustGetState(t)
+
+	lie.Store(true)
+	time.Sleep(2100 * time.Millisecond)
+	if _, resp := p.getState(t); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("state after a refresh whose token userinfo answers for another subject: status = %d, want 401", resp.StatusCode)
+	}
+	if idp.Counts().Refresh != 1 {
+		t.Errorf("refresh token grants = %d, want 1", idp.Counts().Refresh)
+	}
+}
+
+// Discovery used to tell oauth2-proxy which signature algorithms to accept;
+// the provider passes them on, so a PingFederate that signs ID tokens with
+// ES256 still signs users in. PingFederate also advertises none and HS256,
+// which must not be accepted.
+func TestSignInWithES256IDTokens(t *testing.T) {
+	cfg := defaultIDPConfig()
+	cfg.SignES256 = true
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), nil)
+	p.mustLogin(t)
+	if ss := p.mustGetState(t); ss.User != "sub-ada" {
+		t.Errorf("user = %q, want sub-ada", ss.User)
+	}
+}
+
+// When the refresh grant returns an ID token, oauth2-proxy rebuilds the
+// session's email and username, reading userinfo again. A refreshing request
+// must give Obot the refreshed, checked identity, not the one from before the
+// refresh, which may never have been checked: here sign-in's userinfo answer
+// was for another subject, and no state request came before the refresh.
+func TestRefreshingRequestGivesTheCheckedIdentity(t *testing.T) {
+	eve := mockidp.User{Subject: "sub-eve", Email: "eve@example.com", PreferredUsername: "eve"}
+	cfg := defaultIDPConfig()
+	cfg.EmailInIDToken = false
+	cfg.Userinfo = func(n int, owner mockidp.User) (mockidp.User, int) {
+		if n == 1 { // oauth2-proxy's request during sign-in
+			return eve, 0
+		}
+		return owner, 0
+	}
+	idp := startIDP(t, cfg, false)
+	p := mustStartProvider(t, idp.Issuer(), map[string]string{"OBOT_AUTH_PROVIDER_TOKEN_REFRESH_DURATION": "1s"})
+	p.mustLogin(t)
+	time.Sleep(2100 * time.Millisecond)
+
+	ss, resp := p.getState(t)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("refreshing state: status = %d, want 200", resp.StatusCode)
+	}
+	if len(ss.SetCookies) == 0 {
+		t.Fatal("expected the state request to refresh the session")
+	}
+	if ss.Email != "ada@example.com" || ss.PreferredUsername != "ada" {
+		t.Errorf("refreshing state = email %q, username %q: the unchecked pre-refresh identity", ss.Email, ss.PreferredUsername)
+	}
+}
