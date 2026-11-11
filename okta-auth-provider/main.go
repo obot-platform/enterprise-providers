@@ -20,7 +20,7 @@ import (
 	"github.com/obot-platform/enterprise-providers/okta-auth-provider/pkg/profile"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/env"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
-	"github.com/okta/okta-sdk-golang/v5/okta"
+	"github.com/okta/okta-sdk-golang/v6/okta"
 )
 
 type Options struct {

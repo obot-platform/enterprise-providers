@@ -3,7 +3,7 @@ package client
 import (
 	"strings"
 
-	"github.com/okta/okta-sdk-golang/v5/okta"
+	"github.com/okta/okta-sdk-golang/v6/okta"
 )
 
 // Retries for a rate-limited request, and the cap on the wait between them. The SDK leaves both at
