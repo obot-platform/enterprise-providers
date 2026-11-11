@@ -33,6 +33,7 @@ type UserInfo struct {
 // Requires okta.users.read or okta.groups.read scope in the service account token.
 func FetchUserGroupInfos(ctx context.Context, client *okta.APIClient, userID string) (state.GroupInfoList, error) {
 	// Query user-specific groups endpoint (accepts user ID or login/email).
+	// SDK v6 omits Limit; Okta defaults to 200 per page, and we follow Link headers below.
 	groups, resp, err := client.UserResourcesAPI.ListUserGroups(ctx, userID).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch group memberships for user %s: %w", userID, err)
