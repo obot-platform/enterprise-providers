@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/okta/okta-sdk-golang/v5/okta"
+	"github.com/okta/okta-sdk-golang/v6/okta"
 )
 
 func TestServiceCredentialsConfigured(t *testing.T) {

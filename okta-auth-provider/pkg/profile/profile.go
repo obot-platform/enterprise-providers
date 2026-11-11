@@ -13,7 +13,7 @@ import (
 
 	"github.com/obot-platform/enterprise-providers/authcommon"
 	"github.com/obot-platform/providers/auth-providers-common/pkg/state"
-	"github.com/okta/okta-sdk-golang/v5/okta"
+	"github.com/okta/okta-sdk-golang/v6/okta"
 )
 
 const (
@@ -33,7 +33,7 @@ type UserInfo struct {
 // Requires okta.users.read or okta.groups.read scope in the service account token.
 func FetchUserGroupInfos(ctx context.Context, client *okta.APIClient, userID string) (state.GroupInfoList, error) {
 	// Query user-specific groups endpoint (accepts user ID or login/email).
-	groups, resp, err := client.UserAPI.ListUserGroups(ctx, userID).Limit(oktaPageSize).Execute()
+	groups, resp, err := client.UserResourcesAPI.ListUserGroups(ctx, userID).Execute()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch group memberships for user %s: %w", userID, err)
 	}
@@ -99,6 +99,17 @@ func nextGroupCursor(resp *okta.APIResponse) (string, error) {
 	return next.Query().Get("after"), nil
 }
 
+// SDK v6 represents group profiles as a union; names can come from either variant.
+func groupName(profile *okta.GroupProfile) string {
+	if profile == nil {
+		return ""
+	}
+	if profile.OktaActiveDirectoryGroupProfile != nil {
+		return profile.OktaActiveDirectoryGroupProfile.GetName()
+	}
+	return profile.OktaUserGroupProfile.GetName()
+}
+
 // convertOktaGroupsToGroupInfos converts a slice of Okta groups to GroupInfo structs.
 func convertOktaGroupsToGroupInfos(groups []okta.Group) state.GroupInfoList {
 	if len(groups) == 0 {
@@ -107,7 +118,7 @@ func convertOktaGroupsToGroupInfos(groups []okta.Group) state.GroupInfoList {
 
 	groupInfos := make(state.GroupInfoList, 0, len(groups))
 	for _, group := range groups {
-		name := group.Profile.GetName()
+		name := groupName(group.Profile)
 		if name == "Okta Administrators" {
 			// Skip the Okta Administrators group because it does not show in the OIDC groups claim
 			continue
@@ -125,7 +136,7 @@ func convertOktaGroupsToGroupInfos(groups []okta.Group) state.GroupInfoList {
 // convertToGroupInfo converts a single Okta Group to a GroupInfo struct.
 // Follows the same pattern as Entra's convertToGroupInfo.
 func convertToGroupInfo(group okta.Group) *state.GroupInfo {
-	name := group.Profile.GetName()
+	name := groupName(group.Profile)
 	id := group.GetId()
 	if id == "" {
 		return nil
@@ -201,7 +212,7 @@ func BuildGroupMigrationMapping(ctx context.Context, client *okta.APIClient) ([]
 	// Group by name, skipping groups without an ID
 	byName := make(map[string][]okta.Group)
 	for _, group := range allGroups {
-		name := group.Profile.GetName()
+		name := groupName(group.Profile)
 		if name == "" || name == "Okta Administrators" || group.GetId() == "" {
 			continue
 		}
