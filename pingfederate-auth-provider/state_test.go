@@ -39,6 +39,8 @@ type fakePingFederate struct {
 	// omitRefreshIDToken leaves the ID token out of refresh responses, as PingFederate does unless "Return ID Token
 	// on Refresh Grant" is enabled.
 	omitRefreshIDToken bool
+	// discoveryOverrides replaces fields of the discovery document; a nil value removes the field.
+	discoveryOverrides map[string]any
 	// directoryDown makes userinfo answer with the subject alone, as PingFederate does when it cannot reach the
 	// directory it releases attributes from.
 	directoryDown bool
@@ -107,6 +109,14 @@ func (f *fakePingFederate) serve(w http.ResponseWriter, r *http.Request) {
 			"userinfo_endpoint":                     f.issuer() + "/idp/userinfo.openid",
 			"jwks_uri":                              f.issuer() + "/pf/JWKS",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
+		}
+		document := response.(map[string]any)
+		for k, v := range f.discoveryOverrides {
+			if v == nil {
+				delete(document, k)
+			} else {
+				document[k] = v
+			}
 		}
 	case "/pf/JWKS":
 		response = jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &f.key.PublicKey, KeyID: "test", Algorithm: "RS256", Use: "sig"}}}

@@ -274,8 +274,11 @@ func discoverUserInfoURL(ctx context.Context, client *http.Client, issuerURL str
 	}
 
 	var doc struct {
-		Issuer           string `json:"issuer"`
-		UserInfoEndpoint string `json:"userinfo_endpoint"`
+		Issuer                string `json:"issuer"`
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+		TokenEndpoint         string `json:"token_endpoint"`
+		UserInfoEndpoint      string `json:"userinfo_endpoint"`
+		JWKSURI               string `json:"jwks_uri"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil {
 		return "", fmt.Errorf("decode %s: %w", discoveryURL, err)
@@ -283,8 +286,32 @@ func discoverUserInfoURL(ctx context.Context, client *http.Client, issuerURL str
 	if doc.Issuer != issuerURL {
 		return "", fmt.Errorf("PingFederate reports its issuer as %q, which does not match the issuer URL %q; set the issuer URL to PingFederate's base URL exactly as reported", doc.Issuer, issuerURL)
 	}
-	if doc.UserInfoEndpoint == "" {
-		return "", fmt.Errorf("%s does not name a userinfo endpoint", discoveryURL)
+	// oauth2-proxy reads the same document. Users sign in at the authorization endpoint, the client secret and refresh
+	// tokens go to the token endpoint, access tokens to the userinfo endpoint, and the keys that every ID token, and so
+	// every identity and group, is verified with come from the JWKS URI. None of them may travel without TLS.
+	for _, endpoint := range []struct{ name, url string }{
+		{name: "authorization", url: doc.AuthorizationEndpoint},
+		{name: "token", url: doc.TokenEndpoint},
+		{name: "userinfo", url: doc.UserInfoEndpoint},
+		{name: "JWKS", url: doc.JWKSURI},
+	} {
+		if err := requireHTTPS(endpoint.url); err != nil {
+			return "", fmt.Errorf("%s names the %s endpoint %q, which %w; check PingFederate's base URL", discoveryURL, endpoint.name, endpoint.url, err)
+		}
 	}
 	return doc.UserInfoEndpoint, nil
+}
+
+// requireHTTPS reports why rawURL is not an absolute https URL, or nil if it is.
+func requireHTTPS(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	switch {
+	case rawURL == "":
+		return errors.New("is missing")
+	case err != nil:
+		return errors.New("is not a valid URL")
+	case u.Scheme != "https" || u.Host == "":
+		return errors.New("is not an absolute https URL")
+	}
+	return nil
 }

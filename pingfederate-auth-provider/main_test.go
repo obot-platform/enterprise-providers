@@ -128,3 +128,32 @@ func TestProfileName(t *testing.T) {
 		}
 	}
 }
+
+func TestDiscoveryRequiresHTTPSEndpoints(t *testing.T) {
+	// Users sign in at the authorization endpoint, secrets and tokens go to the token and userinfo endpoints, and the
+	// keys that verify every ID token come from the JWKS URI.
+	for _, tc := range []struct {
+		name     string
+		override map[string]any
+	}{
+		{name: "plain-HTTP userinfo endpoint", override: map[string]any{"userinfo_endpoint": "http://sso.example.com/idp/userinfo.openid"}},
+		{name: "plain-HTTP token endpoint", override: map[string]any{"token_endpoint": "http://sso.example.com/as/token.oauth2"}},
+		{name: "relative userinfo endpoint", override: map[string]any{"userinfo_endpoint": "/idp/userinfo.openid"}},
+		{name: "no userinfo endpoint", override: map[string]any{"userinfo_endpoint": nil}},
+		{name: "no token endpoint", override: map[string]any{"token_endpoint": nil}},
+		{name: "plain-HTTP JWKS URI", override: map[string]any{"jwks_uri": "http://sso.example.com/pf/JWKS"}},
+		{name: "plain-HTTP authorization endpoint", override: map[string]any{"authorization_endpoint": "http://sso.example.com/as/authorization.oauth2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakePingFederate(t)
+			f.discoveryOverrides = tc.override
+			client, err := newHTTPClient(f.caPEM())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := discoverUserInfoURL(t.Context(), client, f.issuer()); err == nil {
+				t.Fatal("accepted the discovery document")
+			}
+		})
+	}
+}
